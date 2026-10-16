@@ -118,6 +118,14 @@ class MainWindow(QMainWindow):
         self.name_edit.textChanged.connect(self.update_preview)
         self.update_preview()
 
+        # --- Общая настройка
+        self.show_kompas = QCheckBox(
+            "Показывать окно КОМПАСа во время работы "
+            "(если КОМПАС уже открыт, используется он и окно не прячется)"
+        )
+        self.show_kompas.setChecked(self.settings.value("show_kompas", False, type=bool))
+        layout.addWidget(self.show_kompas)
+
         # --- Журнал
         layout.addWidget(QLabel("Журнал:"))
         self.log = QPlainTextEdit()
@@ -172,7 +180,7 @@ class MainWindow(QMainWindow):
         if project is None:
             return
         self.save_settings()
-        self.start("probe", {"target": project, "verbose": self.verbose.isChecked()}, "Разведка")
+        self.start("probe", {"target": project, "verbose": self.verbose.isChecked(), "show": self.show_kompas.isChecked()}, "Разведка")
 
     def run_rename(self):
         project = self.project_dir()
@@ -200,7 +208,13 @@ class MainWindow(QMainWindow):
         self.save_settings()
         self.start(
             "rename",
-            {"project": project, "part": part, "designation": des, "name": name},
+            {
+                "project": project,
+                "part": part,
+                "designation": des,
+                "name": name,
+                "show": self.show_kompas.isChecked(),
+            },
             "Тест переобозначения",
         )
 
@@ -232,6 +246,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("part", self.part_edit.text())
         self.settings.setValue("designation", self.des_edit.text())
         self.settings.setValue("name", self.name_edit.text())
+        self.settings.setValue("show_kompas", self.show_kompas.isChecked())
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

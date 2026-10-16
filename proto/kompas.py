@@ -31,7 +31,7 @@ def _setup_gen_path():
 _setup_gen_path()
 
 import pythoncom  # noqa: E402
-from win32com.client import Dispatch, gencache  # noqa: E402
+from win32com.client import Dispatch, GetActiveObject, gencache  # noqa: E402
 
 gencache.is_readonly = False
 
@@ -120,13 +120,55 @@ def ext_of(path):
 
 # ---------- приложение и документы ----------
 
-def connect(visible=True):
+def is_running():
+    """Запущен ли уже КОМПАС (например, пользователь работает в нём)."""
+    try:
+        GetActiveObject("Kompas.Application.7")
+        return True
+    except Exception:
+        return False
+
+
+def connect():
     raw = Dispatch("Kompas.Application.7")
     app = try_cast(raw, api7.IApplication)
     if app is None:
         app = cast(raw, api7.IKompasAPIObject).Application
-    app.Visible = visible
     return app
+
+
+class Session:
+    """КОМПАС на время одной операции.
+
+    Если КОМПАС не был запущен, он запускается в фоне без окна
+    (или с окном при show=True) и закрывается в конце.
+    Если пользователь уже работает в КОМПАСе, используется он: окно не прячется
+    и не закрывается.
+    """
+
+    def __init__(self, show=False, log=print):
+        self.started = not is_running()
+        self.app = connect()
+        if self.started:
+            self.app.Visible = show
+            try:
+                # Диалоги КОМПАСа не показывать, на вопросы отвечать «Нет»,
+                # иначе скрытый КОМПАС может ждать ответа, которого никто не даст.
+                self.app.HideMessage = const.ksHideMessageNo
+            except Exception as e:
+                log(f"  не удалось отключить диалоги КОМПАСа: {e}")
+            log("  КОМПАС запущен в фоне" + (" с окном" if show else " без окна"))
+        else:
+            log("  КОМПАС уже был запущен — используется он, окно не скрывается и не закрывается")
+
+    def close(self, log=print):
+        if not self.started:
+            return
+        try:
+            self.app.Quit()
+            log("  фоновый КОМПАС закрыт")
+        except Exception as e:
+            log(f"  не удалось закрыть фоновый КОМПАС: {e}")
 
 
 def connect5():

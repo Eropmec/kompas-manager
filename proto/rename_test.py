@@ -23,9 +23,9 @@ import kompas as K
 from report import Report
 
 
-def run(project, part, designation, name, on_line=None):
+def run(project, part, designation, name, show=False, on_line=None):
     """Тест переобозначения. part — путь к детали внутри проекта (абсолютный или относительный).
-    Возвращает путь к отчёту."""
+    show — показывать окно КОМПАСа и документы. Возвращает путь к отчёту."""
     src = os.path.abspath(project)
     part_abs = part if os.path.isabs(part) else os.path.join(src, part)
     rel = os.path.relpath(os.path.abspath(part_abs), src)
@@ -45,9 +45,18 @@ def run(project, part, designation, name, on_line=None):
         return rep.path
     new_part = os.path.join(os.path.dirname(old_part), K.file_name(designation, name, ".m3d"))
     rep.line(f"Деталь: {os.path.basename(old_part)} -> {os.path.basename(new_part)}")
-    target = (designation, name)
 
-    app = K.connect(visible=True)
+    session = K.Session(show, rep.line)
+    try:
+        _rename(rep, session.app, show, work, old_part, old_dir, new_part, designation, name)
+    finally:
+        session.close(rep.line)
+    rep.summary()
+    return rep.path
+
+
+def _rename(rep, app, show, work, old_part, old_dir, new_part, designation, name):
+    target = (designation, name)
     app5 = None
     old_drawings = []
 
@@ -63,7 +72,7 @@ def run(project, part, designation, name, on_line=None):
     # --- 1. Копия детали под новым именем + свойства
     with rep.step("Деталь: копия под новым именем и запись свойств"):
         shutil.copy2(old_part, new_part)
-        doc = K.open_doc(app, new_part, visible=True, readonly=False)
+        doc = K.open_doc(app, new_part, visible=show, readonly=False)
         try:
             rep.line(f"  было: {K.read_props(doc)}")
             K.write_props(doc, designation, name)
@@ -77,7 +86,7 @@ def run(project, part, designation, name, on_line=None):
     # --- 2. Сборки: перепривязка компонента
     for asm in [p for p in users if K.ext_of(p) == ".a3d"]:
         with rep.step(f"Сборка {os.path.basename(asm)}: замена компонента"):
-            doc = K.open_doc(app, asm, visible=True, readonly=False)
+            doc = K.open_doc(app, asm, visible=show, readonly=False)
             try:
                 replaced = 0
                 for c in K.components(doc):
@@ -105,7 +114,7 @@ def run(project, part, designation, name, on_line=None):
     for drw in [p for p in users if K.ext_of(p) == ".cdw"]:
         new_drw = os.path.join(os.path.dirname(drw), K.file_name(designation, name, ".cdw"))
         with rep.step(f"Чертёж {os.path.basename(drw)} -> {os.path.basename(new_drw)}"):
-            doc = K.open_doc(app, drw, visible=True, readonly=False)
+            doc = K.open_doc(app, drw, visible=show, readonly=False)
             try:
                 rep.line(f"  штамп до: {K.stamp_values(doc)}")
                 switched = 0
@@ -168,8 +177,6 @@ def run(project, part, designation, name, on_line=None):
         stale = [(p, r) for p, refs in live.items() for r in refs if in_old(r)]
         rep.check("никто не ссылается на файлы из _old", not stale, f"найдено: {len(stale)}" if stale else "")
 
-    rep.summary()
-    return rep.path
 
 
 def main():
@@ -178,8 +185,9 @@ def main():
     ap.add_argument("part", help="файл детали относительно папки проекта, например Втулка.m3d")
     ap.add_argument("designation", help="новое обозначение, например АБВГ.001.01")
     ap.add_argument("name", help="новое наименование, например Втулка")
+    ap.add_argument("--show", action="store_true", help="показывать окно КОМПАСа")
     args = ap.parse_args()
-    run(args.project, args.part, args.designation, args.name)
+    run(args.project, args.part, args.designation, args.name, args.show)
 
 
 if __name__ == "__main__":

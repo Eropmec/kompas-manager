@@ -67,23 +67,26 @@ def probe_file(app, path, rep, verbose):
         K.close_doc(doc)
 
 
-def run(target, verbose=False, on_line=None):
-    """Разведка папки проекта или файла. Возвращает путь к отчёту."""
+def run(target, verbose=False, show=False, on_line=None):
+    """Разведка папки проекта или файла. Возвращает путь к отчёту.
+    show — показывать окно КОМПАСа, если он запускается программой."""
     target = os.path.abspath(target)
     folder = target if os.path.isdir(target) else os.path.dirname(target)
     rep = Report(os.path.join(folder, "probe_report.txt"), on_line)
 
-    app = None
+    session = None
     with rep.step("Подключение к КОМПАС-3D"):
-        app = K.connect(visible=True)
-        rep.line(f"  подключено: {app}")
+        session = K.Session(show, rep.line)
 
-    if app is not None:
-        files = K.list_kompas_files(target)
-        rep.line(f"\nФайлов КОМПАС: {len(files)}")
-        for path in files:
-            with rep.step(f"Открытие {os.path.basename(path)}"):
-                probe_file(app, path, rep, verbose)
+    if session is not None:
+        try:
+            files = K.list_kompas_files(target)
+            rep.line(f"\nФайлов КОМПАС: {len(files)}")
+            for path in files:
+                with rep.step(f"Открытие {os.path.basename(path)}"):
+                    probe_file(session.app, path, rep, verbose)
+        finally:
+            session.close(rep.line)
 
     rep.summary()
     return rep.path
@@ -93,8 +96,9 @@ def main():
     ap = argparse.ArgumentParser(description="Разведка Kompas API на тестовом проекте (только чтение)")
     ap.add_argument("path", help="папка проекта или отдельный файл КОМПАС")
     ap.add_argument("--verbose", action="store_true", help="выводить списки свойств интерфейсов")
+    ap.add_argument("--show", action="store_true", help="показывать окно КОМПАСа")
     args = ap.parse_args()
-    run(args.path, args.verbose)
+    run(args.path, args.verbose, args.show)
 
 
 if __name__ == "__main__":
