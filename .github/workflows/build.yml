@@ -22,13 +22,27 @@ jobs:
       - name: Зависимости
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: Тесты
+        run: python -m pytest -q tests
 
       - name: Проверка импорта модулей
-        working-directory: proto
-        run: python -c "import naming, report, app; print('ok')"
+        run: |
+          python -c "import kompas_manager.ui.main_window, kompas_manager.scanner; print('manager ok')"
+          cd proto
+          python -c "import naming, report, app; print('proto ok')"
 
-      - name: Сборка
+      - name: Сборка менеджера
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name KompasManager
+          --paths .
+          --hidden-import kompas_manager.kompas_api
+          --hidden-import kompas_manager.ui.workers
+          run_manager.py
+
+      - name: Сборка прототипа
         run: >
           pyinstaller --noconfirm --onefile --windowed
           --name KompasProto
@@ -40,14 +54,21 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: KompasProto
-          path: dist/KompasProto.exe
+          name: exe
+          path: |
+            dist/KompasManager.exe
+            dist/KompasProto.exe
 
       - name: Публикация в Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: Сборка ${{ github.run_number }}
-          body: "Прототип. Коммит ${{ github.sha }}"
-          files: dist/KompasProto.exe
+          body: |
+            KompasManager.exe — менеджер проектов.
+            KompasProto.exe — прототип проверки API.
+            Коммит ${{ github.sha }}
+          files: |
+            dist/KompasManager.exe
+            dist/KompasProto.exe
           make_latest: true

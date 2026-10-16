@@ -7,3 +7,4 @@ dist/
 .idea/
 probe_report.txt
 rename_report.txt
+.pytest_cache/
