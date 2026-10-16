@@ -1,0 +1,53 @@
+name: Сборка exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Проверка импорта модулей
+        working-directory: proto
+        run: python -c "import naming, report, app; print('ok')"
+
+      - name: Сборка
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name KompasProto
+          --paths proto
+          --hidden-import probe
+          --hidden-import rename_test
+          --hidden-import kompas
+          proto/app.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KompasProto
+          path: dist/KompasProto.exe
+
+      - name: Публикация в Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Сборка ${{ github.run_number }}
+          body: "Прототип. Коммит ${{ github.sha }}"
+          files: dist/KompasProto.exe
+          make_latest: true
