@@ -5,6 +5,39 @@ import traceback
 from PySide6.QtCore import QThread, Signal
 
 
+class RenameWorker(QThread):
+    log = Signal(str)
+    progress = Signal(int, int, str)
+    done = Signal(object)  # RenameResult или None при критической ошибке
+
+    def __init__(self, plan, show=False):
+        super().__init__()
+        self.plan = plan
+        self.show = show
+
+    def run(self):
+        result = None
+        com = None
+        try:
+            import pythoncom as com
+
+            com.CoInitialize()
+        except ImportError:
+            com = None
+        try:
+            from kompas_manager import kompas_api as K
+            from kompas_manager.renamer import execute
+
+            result = execute(self.plan, K, show=self.show, log=self.log.emit, progress=self.progress.emit)
+        except Exception:
+            self.log.emit("Ошибка переобозначения:\n" + traceback.format_exc())
+        finally:
+            gc.collect()
+            if com is not None:
+                com.CoUninitialize()
+        self.done.emit(result)
+
+
 class ScanWorker(QThread):
     log = Signal(str)
     progress = Signal(int, int, str)

@@ -4,12 +4,13 @@ import subprocess
 import sys
 
 from PySide6.QtCore import QSettings, QSortFilterProxyModel, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileDialog,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -31,8 +32,14 @@ from PySide6.QtWidgets import (
 
 from kompas_manager import __version__
 from kompas_manager.core.model import ERROR, INFO, SEVERITY_TITLES, WARNING, norm
+from kompas_manager.core.backup import Backup
+from kompas_manager.core.bulk import bulk_replace
+from kompas_manager.core.numbering import assign
 from kompas_manager.core.project import Project
-from kompas_manager.ui.project_tree import KEY_ROLE, ProjectTreeBuilder, severity_icon
+from kompas_manager.core.rename_plan import build_plan
+from kompas_manager.core.settings import ProjectSettings
+from kompas_manager.ui.dialogs import FindReplaceDialog, PlanDialog, ProjectSchemeDialog
+from kompas_manager.ui.project_tree import COL_DES, COL_NAME, KEY_ROLE, ProjectTreeBuilder, severity_icon
 
 APP_NAME = "Менеджер проектов КОМПАС"
 MAX_RECENT = 8
@@ -46,6 +53,10 @@ class MainWindow(QMainWindow):
         self.project_root = None
         self.worker = None
         self.items_by_key = {}
+        self.proj_settings = None  # настройки обозначения текущего проекта
+        self.pending = {}  # ожидающие изменения: ключ модели -> (обозначение, наименование)
+        self.builder = None
+        self._updating = False
 
         self.resize(1200, 800)
         self._build_actions()
@@ -84,6 +95,22 @@ class MainWindow(QMainWindow):
         self.act_clear_cache = QAction("Очистить кэш сканирования", self)
         self.act_clear_cache.triggered.connect(self.clear_cache)
 
+        self.act_scheme = QAction("Схема обозначения…", self)
+        self.act_scheme.triggered.connect(self.edit_scheme)
+        self.act_apply_scheme = QAction(style.standardIcon(QStyle.SP_ArrowRight), "Применить схему", self)
+        self.act_apply_scheme.setToolTip("Рассчитать обозначения всех элементов по схеме проекта")
+        self.act_apply_scheme.triggered.connect(self.apply_scheme)
+        self.act_find = QAction("Найти и заменить…", self)
+        self.act_find.setShortcut(QKeySequence.Replace)
+        self.act_find.triggered.connect(self.find_replace)
+        self.act_reset = QAction(style.standardIcon(QStyle.SP_DialogResetButton), "Сбросить изменения", self)
+        self.act_reset.triggered.connect(self.reset_pending)
+        self.act_rename = QAction(style.standardIcon(QStyle.SP_DialogApplyButton), "Переобозначить…", self)
+        self.act_rename.setShortcut("Ctrl+Return")
+        self.act_rename.triggered.connect(self.rename)
+        self.act_rollback = QAction("Откатить последнее переобозначение…", self)
+        self.act_rollback.triggered.connect(self.rollback)
+
         self.act_exit = QAction("Выход", self)
         self.act_exit.triggered.connect(self.close)
 
@@ -105,6 +132,16 @@ class MainWindow(QMainWindow):
         m_project.addAction(self.act_expand)
         m_project.addAction(self.act_collapse)
 
+        m_des = menu.addMenu("Обозначения")
+        m_des.addAction(self.act_scheme)
+        m_des.addAction(self.act_apply_scheme)
+        m_des.addAction(self.act_find)
+        m_des.addSeparator()
+        m_des.addAction(self.act_reset)
+        m_des.addAction(self.act_rename)
+        m_des.addSeparator()
+        m_des.addAction(self.act_rollback)
+
         m_tools = menu.addMenu("Сервис")
         m_tools.addAction(self.act_show_kompas)
         m_tools.addAction(self.act_clear_cache)
@@ -120,6 +157,10 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.act_expand)
         toolbar.addAction(self.act_collapse)
+        toolbar.addSeparator()
+        toolbar.addAction(self.act_apply_scheme)
+        toolbar.addAction(self.act_reset)
+        toolbar.addAction(self.act_rename)
         self.addToolBar(toolbar)
 
     def _build_ui(self):
@@ -145,9 +186,11 @@ class MainWindow(QMainWindow):
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tree.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         self.tree.doubleClicked.connect(self._tree_double_clicked)
+        self.tree.expanded.connect(lambda _i: self.tree.resizeColumnToContents(COL_DES))
         splitter.addWidget(self.tree)
 
         self.tabs = QTabWidget()
@@ -193,7 +236,12 @@ class MainWindow(QMainWindow):
             return
         if self.worker is not None:
             return
+        if self.pending and os.path.normcase(path) != os.path.normcase(self.project_root or ""):
+            if not self._confirm_discard():
+                return
+            self.pending = {}
         self.project_root = path
+        self.proj_settings = ProjectSettings.load(path)
         self.settings.setValue("last_dir", os.path.dirname(path))
         self._add_recent(path)
         self._update_title()
@@ -234,21 +282,63 @@ class MainWindow(QMainWindow):
 
     def show_project(self, project):
         """Показать проект в дереве и на вкладке проверок."""
+        first = self.project is None or self.project.root != project.root
         self.project = project
         self.project_root = project.root
-        builder = ProjectTreeBuilder(project, self.style())
-        model = builder.build()
-        self.items_by_key = builder.items_by_key
-        self.proxy.setSourceModel(model)
-        self.tree.expandToDepth(1)
-        header = self.tree.header()
-        for col in range(model.columnCount()):
-            self.tree.resizeColumnToContents(col)
-        header.setStretchLastSection(True)
+        if self.proj_settings is None:
+            self.proj_settings = ProjectSettings.load(project.root)
+        self.pending = {k: v for k, v in self.pending.items() if project.doc(k) is not None}
+        self._rebuild_tree(expand_default=first)
         self._fill_issues()
         self._update_counts()
         self._update_title()
         self._apply_filter(self.filter_edit.text())
+
+    def _rebuild_tree(self, expand_default=False):
+        expanded = None if expand_default else self._expanded_keys()
+        self._updating = True
+        self.builder = ProjectTreeBuilder(self.project, self.style(), self.pending, self.proj_settings)
+        model = self.builder.build()
+        self.items_by_key = self.builder.items_by_key
+        self.proxy.setSourceModel(model)
+        model.itemChanged.connect(self._on_item_changed)
+        self._updating = False
+        if expanded is None:
+            self.tree.expandToDepth(1)
+            for col in range(model.columnCount()):
+                self.tree.resizeColumnToContents(col)
+            self.tree.header().setStretchLastSection(True)
+        else:
+            self._restore_expanded(expanded)
+        for col in (COL_DES, COL_NAME):
+            self.tree.resizeColumnToContents(col)
+        busy = self.worker is not None
+        for act in (self.act_scheme, self.act_apply_scheme, self.act_find, self.act_rollback):
+            act.setEnabled(not busy)
+        self._update_pending_actions()
+
+    def _expanded_keys(self):
+        result = set()
+
+        def walk(parent):
+            for row in range(self.proxy.rowCount(parent)):
+                index = self.proxy.index(row, 0, parent)
+                if self.tree.isExpanded(index):
+                    result.add(index.data(KEY_ROLE) or index.data())
+                    walk(index)
+
+        walk(self.tree.rootIndex())
+        return result
+
+    def _restore_expanded(self, keys):
+        def walk(parent):
+            for row in range(self.proxy.rowCount(parent)):
+                index = self.proxy.index(row, 0, parent)
+                if (index.data(KEY_ROLE) or index.data()) in keys:
+                    self.tree.expand(index)
+                    walk(index)
+
+        walk(self.tree.rootIndex())
 
     def _fill_issues(self):
         self.issues.clear()
@@ -287,6 +377,8 @@ class MainWindow(QMainWindow):
         return self.project.raw_paths.get(key, key) if self.project else key
 
     def _tree_double_clicked(self, index):
+        if index.column() in (COL_DES, COL_NAME) and self.proxy.flags(index) & Qt.ItemIsEditable:
+            return  # двойной щелчок по обозначению или наименованию — правка
         key = self._key_at(index)
         if key:
             self.open_in_kompas(key)
@@ -310,6 +402,19 @@ class MainWindow(QMainWindow):
         act.setEnabled(exists)
         if d is not None and d.designation:
             menu.addAction("Копировать обозначение", lambda: QApplication.clipboard().setText(d.designation))
+        if self.builder is not None and self.builder.editable(key) and self.worker is None:
+            menu.addSeparator()
+            if key in self.pending:
+                menu.addAction("Отменить изменение", lambda: self._set_pending(key, None))
+            field = "сборка" if d.kind == "assembly" else "деталь"
+            pin = self.proj_settings.pin(self.project.root, key)
+            menu.addAction(f"Закрепить номер ({field})…", lambda: self._pin_number(key, field))
+            if pin:
+                menu.addAction("Снять закреплённый номер", lambda: self._unpin(key))
+            act = menu.addAction("Не нумеровать (стандартное или покупное изделие)")
+            act.setCheckable(True)
+            act.setChecked(self.proj_settings.is_excluded(self.project.root, key))
+            act.toggled.connect(lambda v: self._set_excluded(key, v))
         issues = p.issues_by_key.get(key, [])
         if issues:
             menu.addSeparator()
@@ -355,6 +460,221 @@ class MainWindow(QMainWindow):
         self.tree.scrollTo(index, QAbstractItemView.PositionAtCenter)
         self.tree.setFocus()
 
+    # ---------- обозначения ----------
+
+    def _on_item_changed(self, item):
+        if self._updating or item.column() not in (COL_DES, COL_NAME):
+            return
+        key = item.index().siblingAtColumn(0).data(KEY_ROLE)
+        d = self.project.doc(key) if key else None
+        if d is None:
+            return
+        des, name = self.pending.get(key, (d.designation, d.name))
+        text = item.text().strip()
+        if item.column() == COL_DES:
+            des = text
+        else:
+            name = text
+        self._set_pending(key, (des, name))
+
+    def _set_pending(self, key, value):
+        d = self.project.doc(key)
+        if value is None or tuple(value) == (d.designation, d.name):
+            self.pending.pop(key, None)
+        else:
+            self.pending[key] = tuple(value)
+        self._updating = True
+        self.builder.refresh_key(key)
+        self._updating = False
+        self._update_pending_actions()
+
+    def _update_pending_actions(self):
+        n = len(self.pending)
+        busy = self.worker is not None
+        self.act_reset.setEnabled(bool(n) and not busy)
+        self.act_rename.setEnabled(bool(n) and not busy)
+        self.act_rename.setText(f"Переобозначить ({n})…" if n else "Переобозначить…")
+
+    def _confirm_discard(self):
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"Есть непримененные изменения обозначений ({len(self.pending)}). Отказаться от них?",
+        )
+        return answer == QMessageBox.Yes
+
+    def _save_settings(self):
+        try:
+            self.proj_settings.save(self.project.root)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, f"Не удалось сохранить настройки проекта:\n{e}")
+
+    def edit_scheme(self):
+        if self.project is None:
+            return
+        if ProjectSchemeDialog(self.proj_settings, self).exec():
+            self._save_settings()
+            self.statusBar().showMessage(
+                f"Схема проекта: {self.proj_settings.scheme.template}, код {self.proj_settings.code}. "
+                "«Применить схему» рассчитает обозначения.", 8000)
+
+    def apply_scheme(self):
+        if self.project is None:
+            return
+        result, warnings = assign(self.project, self.proj_settings)
+        changed = 0
+        for key, des in result.items():
+            d = self.project.doc(key)
+            name = self.pending.get(key, (d.designation, d.name))[1]
+            if (des, name) != (d.designation, d.name):
+                self.pending[key] = (des, name)
+                changed += 1
+            else:
+                self.pending.pop(key, None)
+        self._rebuild_tree()
+        for w in warnings:
+            self.log.appendPlainText(f"Схема: {self.project.display_path(w.key)}: {w.message}")
+        msg = f"По схеме изменится обозначений: {changed}. Проверьте выделенные значения и нажмите «Переобозначить»."
+        if warnings:
+            msg += f"\n\nПредупреждений: {len(warnings)} (см. вкладку «Журнал»)."
+            self.tabs.setCurrentWidget(self.log)
+        QMessageBox.information(self, APP_NAME, msg)
+
+    def _subtree_keys(self, key):
+        out, stack = [], [key]
+        while stack:
+            k = stack.pop()
+            if k in out:
+                continue
+            out.append(k)
+            stack.extend(c for c, _ in self.project.components.get(k, []))
+        return out
+
+    def find_replace(self):
+        if self.project is None:
+            return
+        current = self._key_at(self.tree.currentIndex())
+        dlg = FindReplaceDialog(bool(current), self)
+        if not dlg.exec():
+            return
+        v = dlg.values()
+        keys = self._subtree_keys(current) if v["selection"] and current else list(self.project.docs)
+        values = {}
+        for k in keys:
+            if self.builder.editable(k):
+                d = self.project.doc(k)
+                values[k] = self.pending.get(k, (d.designation, d.name))
+        changes = bulk_replace(values, v["field"], v["find"], v["repl"], v["case"])
+        for k, pair in changes.items():
+            d = self.project.doc(k)
+            if pair == (d.designation, d.name):
+                self.pending.pop(k, None)
+            else:
+                self.pending[k] = pair
+        self._rebuild_tree()
+        self.statusBar().showMessage(f"Заменено значений: {len(changes)}", 6000)
+
+    def reset_pending(self):
+        if self.pending and self._confirm_discard():
+            self.pending = {}
+            self._rebuild_tree()
+
+    def _pin_number(self, key, field):
+        current = self.proj_settings.pin(self.project.root, key).get(field, 1)
+        value, ok = QInputDialog.getInt(
+            self, "Закрепить номер",
+            f"Номер ({field}) для «{self.project.doc(key).name}».\n"
+            "Автонумерация будет его пропускать.", current, 0, 9999)
+        if ok:
+            self.proj_settings.set_pin(self.project.root, key, field, value)
+            self._save_settings()
+            self.builder.refresh_key(key)
+
+    def _unpin(self, key):
+        self.proj_settings.set_pin(self.project.root, key, None, None)
+        self._save_settings()
+        self.builder.refresh_key(key)
+
+    def _set_excluded(self, key, value):
+        self.proj_settings.set_excluded(self.project.root, key, value)
+        self._save_settings()
+        self.builder.refresh_key(key)
+
+    def rename(self):
+        if not self.pending or self.worker is not None:
+            return
+        plan = build_plan(self.project, self.pending)
+        if not plan.ops and not plan.issues:
+            QMessageBox.information(self, APP_NAME, "Изменений нет.")
+            return
+        if not PlanDialog(plan, self.project, self.style(), self).exec():
+            return
+        from kompas_manager.ui.workers import RenameWorker
+
+        self.log.appendPlainText("\n=== Переобозначение")
+        self.tabs.setCurrentWidget(self.log)
+        self._plan = plan
+        self.worker = RenameWorker(plan, show=self.act_show_kompas.isChecked())
+        self._set_busy(True)
+        self.worker.log.connect(self.log.appendPlainText)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.done.connect(self._on_rename_done)
+        self.worker.start()
+
+    def _on_rename_done(self, result):
+        self.worker.wait()
+        self.worker = None
+        self._set_busy(False)
+        plan = self._plan
+        if result is not None and result.done:
+            self.proj_settings.rename_paths(self.project.root, plan.mapping)
+            self._save_settings()
+            self.pending = {}
+            text = f"Переобозначение выполнено. Файлов затронуто: {len(plan.ops)}."
+            if result.warnings:
+                text += "\n\nЗамечания:\n" + "\n".join(result.warnings[:15])
+            text += "\n\nПроект будет перечитан. Проверьте спецификации: при необходимости синхронизируйте их со сборкой в КОМПАСе."
+            QMessageBox.information(self, APP_NAME, text)
+        else:
+            errors = result.errors if result is not None else ["см. журнал"]
+            text = "Переобозначение не завершено:\n" + "\n".join(errors[:15])
+            if result is not None and result.backup is not None:
+                text += "\n\nСтарые файлы не удалены. Чтобы вернуть всё как было — «Обозначения → Откатить последнее переобозначение»."
+            QMessageBox.warning(self, APP_NAME, text)
+        for w in (result.warnings if result else []):
+            self.log.appendPlainText("  замечание: " + w)
+        self.scan(force=False)
+
+    def rollback(self):
+        if self.project is None or self.worker is not None:
+            return
+        backup = Backup.latest(self.project.root)
+        if backup is None:
+            QMessageBox.information(self, APP_NAME, "Резервных копий для отката нет.")
+            return
+        m = backup.manifest
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"Откатить переобозначение от {m['time']}?\n\n"
+            f"Будет восстановлено файлов: {len(m['originals'])}, удалено созданных: {len(m['created'])}.\n"
+            "Изменения, сделанные в этих файлах после переобозначения, будут потеряны.\n"
+            "Файлы должны быть закрыты в КОМПАСе.",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            self.log.appendPlainText(f"\n=== Откат: {backup.folder}")
+            errors = backup.rollback(log=self.log.appendPlainText)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if errors:
+            QMessageBox.warning(self, APP_NAME, "Откат выполнен не полностью:\n" + "\n".join(errors[:15]))
+        else:
+            QMessageBox.information(self, APP_NAME, "Откат выполнен. Проект будет перечитан.")
+        self.pending = {}
+        self.proj_settings = ProjectSettings.load(self.project.root)
+        self.scan(force=False)
+
     # ---------- прочее ----------
 
     def clear_cache(self):
@@ -381,6 +701,14 @@ class MainWindow(QMainWindow):
         self.act_refresh.setEnabled(not busy and bool(self.project_root))
         self.act_rescan.setEnabled(not busy and bool(self.project_root))
         self.menu_recent.setEnabled(not busy)
+        has_project = not busy and self.project is not None
+        for act in (self.act_scheme, self.act_apply_scheme, self.act_find, self.act_rollback):
+            act.setEnabled(has_project)
+        self.tree.setEditTriggers(
+            QAbstractItemView.NoEditTriggers if busy
+            else QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        )
+        self._update_pending_actions()
         if busy:
             self.progress.setMaximum(0)  # неопределённый прогресс, пока не известно число файлов
 
@@ -414,7 +742,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.worker is not None:
-            QMessageBox.information(self, APP_NAME, "Идёт сканирование. Остановите его и дождитесь окончания.")
+            QMessageBox.information(self, APP_NAME, "Идёт операция с КОМПАСом. Дождитесь окончания.")
+            event.ignore()
+            return
+        if self.pending and not self._confirm_discard():
             event.ignore()
             return
         event.accept()

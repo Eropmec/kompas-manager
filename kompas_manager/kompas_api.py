@@ -299,6 +299,31 @@ def spec_attached(doc):
     return result
 
 
+def spec_relink(doc, mapping):
+    """Заменить связанные с спецификацией документы по mapping (norm-ключ -> новый путь).
+    Возвращает число замен."""
+    spec = try_cast(doc, api7.ISpecificationDocument)
+    if spec is None:
+        raise RuntimeError("Не удалось получить ISpecificationDocument")
+    attached = spec.AttachedDocuments
+    to_replace = []
+    for d in list(items(attached, "Item")):
+        for attr in ("Name", "FileName", "PathName"):
+            value = getattr(d, attr, None)
+            if value:
+                if norm(value) in mapping:
+                    to_replace.append((d, mapping[norm(value)]))
+                break
+    for d, _new in to_replace:
+        d.Delete()
+    for _d, new in to_replace:
+        try:
+            attached.Add(new, True)
+        except TypeError:
+            attached.Add(new)
+    return len(to_replace)
+
+
 # ---------- ссылки ----------
 
 def references(doc, path):

@@ -1,14 +1,18 @@
-"""Модель дерева проекта для QTreeView."""
+"""Модель дерева проекта для QTreeView.
+
+Обозначение и наименование моделей можно править прямо в дереве. Изменения не пишутся
+в файлы сразу, а копятся в «ожидающих изменениях» (pending) и показываются выделенными.
+"""
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QStyle
 
 from kompas_manager.core.model import ERROR, INFO, KIND_TITLES, SEVERITY_TITLES, WARNING
 
 COLUMNS = ["Обозначение", "Наименование", "Тип", "Кол.", "Документы", "Файл", "Состояние"]
-COL_STATE = 6
+COL_DES, COL_NAME, COL_STATE = 0, 1, 6
 
 KEY_ROLE = Qt.UserRole + 1
 
@@ -18,18 +22,28 @@ SEVERITY_ICONS = {
     INFO: QStyle.SP_MessageBoxInformation,
 }
 
+CHANGED_COLOR = QColor(20, 90, 200)
+MUTED_COLOR = QColor(130, 130, 130)
+
 
 def severity_icon(style, severity):
     return style.standardIcon(SEVERITY_ICONS[severity])
 
 
 class ProjectTreeBuilder:
-    def __init__(self, project, style):
+    def __init__(self, project, style, pending=None, settings=None):
         self.project = project
         self.style = style
+        self.pending = pending if pending is not None else {}
+        self.settings = settings
         self.model = QStandardItemModel()
         self.model.setHorizontalHeaderLabels(COLUMNS)
-        self.items_by_key = {}  # ключ файла -> первые ячейки строк, где он показан
+        self.items_by_key = {}  # ключ -> первые ячейки строк
+        self.rows_by_key = {}  # ключ -> все строки (списки ячеек), где показан файл
+
+    def editable(self, key):
+        d = self.project.doc(key)
+        return d is not None and d.kind in ("part", "assembly") and self.project.inside(key) and not d.error
 
     def build(self):
         p = self.project
@@ -95,21 +109,69 @@ class ProjectTreeBuilder:
             for cell in cells:
                 cell.setForeground(red)
         else:
-            cells[0].setText(d.designation)
-            cells[1].setText(d.name)
             cells[2].setText(KIND_TITLES.get(d.kind, d.kind))
             cells[4].setText(self._documents_text(key))
-            issues = p.issues_by_key.get(key, [])
-            if issues:
-                worst = p.worst_severity(key)
-                cells[COL_STATE].setIcon(severity_icon(self.style, worst))
-                cells[COL_STATE].setText(SEVERITY_TITLES[worst].lower() + (f" (+{len(issues) - 1})" if len(issues) > 1 else ""))
-                tip = "\n".join(f"• {i.message}" for i in issues)
+            if self.editable(key):
+                cells[COL_DES].setEditable(True)
+                cells[COL_NAME].setEditable(True)
+            if not p.inside(key):
                 for cell in cells:
-                    cell.setToolTip(tip)
+                    cell.setForeground(QBrush(MUTED_COLOR))
 
         self.items_by_key.setdefault(key, []).append(cells[0])
+        self.rows_by_key.setdefault(key, []).append(cells)
+        self.refresh_row(cells, key)
         return cells
+
+    def refresh_row(self, cells, key):
+        """Показать значения с учётом ожидающих изменений и состояние строки."""
+        p = self.project
+        d = p.doc(key)
+        if d is None:
+            return
+        des, name = self.pending.get(key, (d.designation, d.name))
+        cells[COL_DES].setText(des)
+        cells[COL_NAME].setText(name)
+        for col, new, old in ((COL_DES, des, d.designation), (COL_NAME, name, d.name)):
+            font = cells[col].font()
+            changed = new != old
+            font.setBold(changed)
+            cells[col].setFont(font)
+            if changed:
+                cells[col].setForeground(QBrush(CHANGED_COLOR))
+                cells[col].setToolTip(f"Было: {old or '—'}")
+            elif p.inside(key):
+                cells[col].setData(None, Qt.ForegroundRole)
+                cells[col].setToolTip("")
+
+        notes = []
+        if self.settings is not None and d.kind in ("part", "assembly"):
+            if self.settings.is_excluded(p.root, key):
+                notes.append("не нумеруется")
+            pin = self.settings.pin(p.root, key)
+            if pin:
+                field, value = next(iter(pin.items()))
+                notes.append(f"№ {field} {value} закреплён")
+        issues = p.issues_by_key.get(key, [])
+        state = cells[COL_STATE]
+        if key in self.pending:
+            state.setIcon(self.style.standardIcon(QStyle.SP_FileDialogDetailedView))
+            text = "изменено"
+        elif issues:
+            worst = p.worst_severity(key)
+            state.setIcon(severity_icon(self.style, worst))
+            text = SEVERITY_TITLES[worst].lower() + (f" (+{len(issues) - 1})" if len(issues) > 1 else "")
+        else:
+            state.setIcon(QIcon())
+            text = ""
+        state.setText("; ".join([t for t in [text] + notes if t]))
+        tip = "\n".join(f"• {i.message}" for i in issues)
+        for col in (2, 3, 4, 5, COL_STATE):
+            cells[col].setToolTip(tip)
+
+    def refresh_key(self, key):
+        for cells in self.rows_by_key.get(key, []):
+            self.refresh_row(cells, key)
 
     def _documents_text(self, key):
         parts = []
