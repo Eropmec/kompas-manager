@@ -39,6 +39,7 @@ from kompas_manager.core.project import Project
 from kompas_manager.core.rename_plan import build_plan
 from kompas_manager.core.settings import ProjectSettings
 from kompas_manager.ui.dialogs import FindReplaceDialog, PlanDialog, ProjectSchemeDialog
+from kompas_manager.ui.library_panel import LibraryPanel
 from kompas_manager.ui.project_tree import COL_DES, COL_NAME, KEY_ROLE, ProjectTreeBuilder, severity_icon
 
 APP_NAME = "Менеджер проектов КОМПАС"
@@ -209,7 +210,14 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
-        self.setCentralWidget(central)
+        self.main_tabs = QTabWidget()
+        self.main_tabs.addTab(central, "Проект")
+        self.library = LibraryPanel()
+        self.library.insert_requested.connect(self.insert_element)
+        self.library.passport_requested.connect(self.edit_passport)
+        self.main_tabs.addTab(self.library, "Библиотека")
+        self.setCentralWidget(self.main_tabs)
+        self.library.reload()
 
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(260)
@@ -415,6 +423,9 @@ class MainWindow(QMainWindow):
             act.setCheckable(True)
             act.setChecked(self.proj_settings.is_excluded(self.project.root, key))
             act.toggled.connect(lambda v: self._set_excluded(key, v))
+        if d is not None and d.kind == "assembly" and p.inside(key) and self.worker is None:
+            menu.addSeparator()
+            menu.addAction("Вынести изменённые в сборке вхождения в файлы…", lambda: self.extract_instances(key))
         issues = p.issues_by_key.get(key, [])
         if issues:
             menu.addSeparator()
@@ -675,6 +686,154 @@ class MainWindow(QMainWindow):
         self.proj_settings = ProjectSettings.load(self.project.root)
         self.scan(force=False)
 
+    # ---------- библиотека ----------
+
+    def _run_call(self, fn, on_done, title):
+        if self.worker is not None:
+            return
+        from kompas_manager.ui.workers import CallWorker
+
+        self.log.appendPlainText(f"\n=== {title}")
+        self.worker = CallWorker(fn)
+        self._set_busy(True)
+        self.statusBar().showMessage(title + "…")
+        self.worker.log.connect(self.log.appendPlainText)
+
+        def done(result, error):
+            self.worker.wait()
+            self.worker = None
+            self._set_busy(False)
+            self.statusBar().clearMessage()
+            if error:
+                QMessageBox.warning(self, APP_NAME, f"{title}: ошибка.\n{error}\n\nПодробности — на вкладке «Журнал» проекта.")
+                return
+            on_done(result)
+
+        self.worker.done.connect(done)
+        self.worker.start()
+
+    def _read_element(self, element, then):
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.library_ops import read_element
+
+            session = K.Session(show, log)
+            try:
+                return read_element(K, session.app, element.path)
+            finally:
+                session.close(log)
+
+        self._run_call(fn, then, f"Чтение переменных: {element.title}")
+
+    def edit_passport(self, element, force_read=False):
+        if element.passport and element.passport.variables and not force_read:
+            self._open_passport(element, element.passport.variables, ("", ""))
+        else:
+            self._read_element(element, lambda r: self._open_passport(element, r[2], (r[0], r[1])))
+
+    def _open_passport(self, element, variables, props):
+        from kompas_manager.ui.library_dialogs import PassportDialog
+
+        dlg = PassportDialog(element, variables, props, self)
+        result = dlg.exec()
+        if dlg.reread:
+            self.edit_passport(element, force_read=True)
+        elif result:
+            self.library.reload()
+            self.statusBar().showMessage(f"Паспорт сохранён: {element.title}", 5000)
+
+    def insert_element(self, element):
+        if self.project is None:
+            QMessageBox.information(self, APP_NAME, "Сначала откройте проект: копия элемента кладётся в папку проекта.")
+            return
+        p = element.passport
+        if p and p.variables:
+            self._open_insert(element, ("", ""))
+        else:
+            from kompas_manager.core.library import Element, Passport
+
+            def then(r):
+                temp = Element(element.path, Passport(kind=p.kind if p else "standard",
+                                                      designation_template=p.designation_template if p else "",
+                                                      name_template=p.name_template if p else "",
+                                                      table=p.table if p else "", variables=r[2]))
+                self._open_insert(temp, (r[0], r[1]))
+
+            self._read_element(element, then)
+
+    def _open_insert(self, element, props):
+        from kompas_manager.core.library import read_table
+        from kompas_manager.ui.library_dialogs import InsertDialog
+
+        table = None
+        if element.table_path():
+            try:
+                table = read_table(element.table_path())
+            except Exception as e:
+                QMessageBox.warning(self, APP_NAME, f"Таблица типоразмеров не прочиталась:\n{e}")
+        dlg = InsertDialog(element, self.project.root, table, props, self)
+        if not dlg.exec():
+            return
+        plan = dlg.plan
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.library_ops import insert_copy
+
+            return insert_copy(K, plan, element, show=show, log=log)
+
+        def done(path):
+            QApplication.clipboard().setText(path)
+            QMessageBox.information(
+                self, APP_NAME,
+                ("Используется существующий файл:\n" if plan.reuse else "Копия создана:\n")
+                + os.path.relpath(path, self.project.root)
+                + "\n\nПуть скопирован в буфер обмена: в КОМПАСе «Добавить компонент из файла» → вставить путь.")
+            self.scan(force=False)
+
+        self._run_call(fn, done, f"Вставка: {element.title}")
+
+    def extract_instances(self, key):
+        assembly = self._path(key)
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.library_ops import analyze_assembly
+
+            return analyze_assembly(K, assembly, show=show, log=log)
+
+        self._run_call(fn, lambda r: self._confirm_extract(assembly, *r), f"Анализ вхождений: {os.path.basename(assembly)}")
+
+    def _confirm_extract(self, assembly, comps, file_values, file_props):
+        from kompas_manager.core.library import load_passport, plan_extract
+        from kompas_manager.ui.library_dialogs import ExtractDialog
+
+        passports = {path: load_passport(path) for _i, path, _v in comps}
+        passports = {k: v for k, v in passports.items() if v}
+        groups = plan_extract(comps, file_values, file_props, os.path.dirname(assembly), passports)
+        if not groups:
+            QMessageBox.information(self, APP_NAME, "В сборке нет вхождений с переменными, изменёнными на уровне сборки.")
+            return
+        if not ExtractDialog(groups, self.project, self).exec():
+            return
+        root = self.project.root
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.library_ops import extract_instances
+
+            return extract_instances(K, root, assembly, groups, passports, show=show, log=log)
+
+        def done(_backup):
+            QMessageBox.information(self, APP_NAME,
+                                    f"Готово: создано файлов {sum(1 for g in groups if not g.reuse)}, "
+                                    f"перепривязано вхождений {sum(len(g.instances) for g in groups)}.\n"
+                                    "Откат — «Обозначения → Откатить последнее переобозначение».")
+            self.scan(force=False)
+
+        self._run_call(fn, done, "Вынос вхождений в файлы")
+
     # ---------- прочее ----------
 
     def clear_cache(self):
@@ -701,6 +860,8 @@ class MainWindow(QMainWindow):
         self.act_refresh.setEnabled(not busy and bool(self.project_root))
         self.act_rescan.setEnabled(not busy and bool(self.project_root))
         self.menu_recent.setEnabled(not busy)
+        if hasattr(self, "library"):
+            self.library.setEnabled(not busy)
         has_project = not busy and self.project is not None
         for act in (self.act_scheme, self.act_apply_scheme, self.act_find, self.act_rollback):
             act.setEnabled(has_project)

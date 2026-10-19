@@ -5,6 +5,39 @@ import traceback
 from PySide6.QtCore import QThread, Signal
 
 
+class CallWorker(QThread):
+    """Выполняет функцию fn(K, log) с КОМПАСом в отдельном потоке."""
+
+    log = Signal(str)
+    done = Signal(object, str)  # результат, текст ошибки (пусто при успехе)
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self):
+        result, error = None, ""
+        com = None
+        try:
+            import pythoncom as com
+
+            com.CoInitialize()
+        except ImportError:
+            com = None
+        try:
+            from kompas_manager import kompas_api as K
+
+            result = self.fn(K, self.log.emit)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            self.log.emit("Ошибка:\n" + traceback.format_exc())
+        finally:
+            gc.collect()
+            if com is not None:
+                com.CoUninitialize()
+        self.done.emit(result, error)
+
+
 class RenameWorker(QThread):
     log = Signal(str)
     progress = Signal(int, int, str)

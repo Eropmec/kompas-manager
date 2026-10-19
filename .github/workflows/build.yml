@@ -40,6 +40,9 @@ jobs:
           --paths .
           --hidden-import kompas_manager.kompas_api
           --hidden-import kompas_manager.ui.workers
+          --hidden-import kompas_manager.ui.library_dialogs
+          --hidden-import kompas_manager.library_ops
+          --hidden-import openpyxl
           run_manager.py
 
       - name: Сборка прототипа

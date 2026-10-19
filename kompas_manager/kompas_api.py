@@ -232,6 +232,103 @@ def components(doc):
     return list(items(top_part(doc).Parts, "Part"))
 
 
+# ---------- переменные 3D ----------
+
+def _wrap(obj, iface):
+    """Элемент массива COM: сырой PyIDispatch или уже обёрнутый объект -> интерфейс."""
+    if obj is None:
+        return None
+    if hasattr(obj, "_oleobj_"):
+        return try_cast(obj, iface) or obj
+    try:
+        return iface(obj)
+    except Exception:
+        return obj
+
+
+def _first_attr(obj, names, default=None):
+    for n in names:
+        try:
+            value = getattr(obj, n)
+        except Exception:
+            continue
+        if value is not None:
+            return value
+    return default
+
+
+def var_info(v):
+    return {
+        "name": _first_attr(v, ("Name",), ""),
+        "expression": _first_attr(v, ("Expression",), ""),
+        "value": _first_attr(v, ("Value",), None),
+        "external": bool(_first_attr(v, ("External",), False)),
+        "info": bool(_first_attr(v, ("IsInformation", "Information", "InformationVariable"), False)),
+        "note": _first_attr(v, ("Note", "Comment"), ""),
+    }
+
+
+def feature(part):
+    f = try_cast(part, api7.IFeature7)
+    if f is None:
+        raise RuntimeError("Не удалось получить IFeature7 для детали")
+    return f
+
+
+def variable_objects(part, external=True, in_source=True):
+    raw = feature(part).Variables(external, in_source)
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    return [_wrap(v, api7.IVariable7) for v in raw]
+
+
+def variables(part, external=True, in_source=True):
+    """Список переменных: [{name, expression, value, external, info, note}]."""
+    return [var_info(v) for v in variable_objects(part, external, in_source)]
+
+
+def set_variables(doc, values, log=print):
+    """Записать выражения внешних переменных модели и перестроить её.
+    values: {имя: выражение}. Возвращает способ перестроения."""
+    part = top_part(doc)
+    f = feature(part)
+    for name, expr in values.items():
+        v = None
+        try:
+            v = f.Variable(True, True, name)
+        except Exception:
+            v = None
+        if v is None:
+            for obj in variable_objects(part, True, True):
+                if _first_attr(obj, ("Name",), "") == name:
+                    v = obj
+                    break
+        if v is None:
+            raise RuntimeError(f"Нет внешней переменной {name}")
+        v = _wrap(v, api7.IVariable7)
+        try:
+            v.Expression = str(expr)
+        except Exception as e:
+            log(f"  {name}: Expression не записался ({e}), пробую Value")
+            v.Value = float(expr)
+    for how, call in (
+        ("IPart7.RebuildModel(True)", lambda: part.RebuildModel(True)),
+        ("IKompasDocument3D.RebuildDocument()", lambda: cast(doc, api7.IKompasDocument3D).RebuildDocument()),
+    ):
+        try:
+            call()
+            try:
+                part.Update()
+            except Exception:
+                pass
+            return how
+        except Exception as e:
+            log(f"  перестроение через {how} не удалось: {e}")
+    raise RuntimeError("Модель не перестроилась")
+
+
 def rebuild_3d(doc):
     cast(doc, api7.IKompasDocument3D).RebuildDocument()
 
