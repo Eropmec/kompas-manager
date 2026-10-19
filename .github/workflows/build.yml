@@ -50,6 +50,7 @@ jobs:
           --hidden-import probe
           --hidden-import rename_test
           --hidden-import kompas
+          --hidden-import lib_test
           proto/app.py
 
       - uses: actions/upload-artifact@v4

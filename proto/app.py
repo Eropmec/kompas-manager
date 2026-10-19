@@ -22,13 +22,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from naming import file_name
 
-APP_TITLE = "КОМПАС: прототип переобозначения"
+APP_TITLE = "КОМПАС: прототип"
 
 
 class Worker(QThread):
@@ -52,6 +53,11 @@ class Worker(QThread):
                 import probe
 
                 report_path = probe.run(on_line=self.line.emit, **self.kwargs)
+            elif self.task.startswith("lib_"):
+                import lib_test
+
+                func = getattr(lib_test, "run_" + self.task[4:])
+                report_path = func(on_line=self.line.emit, **self.kwargs)
             else:
                 import rename_test
 
@@ -74,7 +80,12 @@ class MainWindow(QMainWindow):
         self.last_report = ""
 
         central = QWidget()
-        layout = QVBoxLayout(central)
+        root_layout = QVBoxLayout(central)
+        self.tabs = QTabWidget()
+        root_layout.addWidget(self.tabs)
+        tab1 = QWidget()
+        layout = QVBoxLayout(tab1)
+        self.tabs.addTab(tab1, "Переобозначение")
 
         # --- 1. Разведка
         g1 = QGroupBox("1. Разведка: что видит Kompas API (только чтение)")
@@ -117,6 +128,10 @@ class MainWindow(QMainWindow):
         self.des_edit.textChanged.connect(self.update_preview)
         self.name_edit.textChanged.connect(self.update_preview)
         self.update_preview()
+        layout.addStretch(1)
+        self.tabs.addTab(self._build_library_tab(), "Библиотека")
+        self.tabs.setCurrentIndex(int(self.settings.value("tab", 1)))
+        layout = root_layout
 
         # --- Общая настройка
         self.show_kompas = QCheckBox(
@@ -147,6 +162,117 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
 
         self.setCentralWidget(central)
+
+    # ---------- вкладка «Библиотека» ----------
+
+    def _path_row(self, grid, row, label, key, pick):
+        edit = QLineEdit(self.settings.value(key, ""))
+        btn = QPushButton("Обзор…")
+        btn.clicked.connect(lambda: pick(edit))
+        grid.addWidget(QLabel(label), row, 0)
+        grid.addWidget(edit, row, 1)
+        grid.addWidget(btn, row, 2)
+        return edit
+
+    def _pick_dir(self, edit):
+        path = QFileDialog.getExistingDirectory(self, "Папка", edit.text() or os.path.expanduser("~"))
+        if path:
+            edit.setText(os.path.normpath(path))
+
+    def _pick_file(self, edit, flt):
+        start = edit.text() or self.lib_dir.text() or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(self, "Файл", start, flt)
+        if path:
+            edit.setText(os.path.normpath(path))
+
+    def _build_library_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        g1 = QGroupBox("1. Модели библиотеки и их внешние переменные (только чтение)")
+        l1 = QGridLayout(g1)
+        self.lib_dir = self._path_row(l1, 0, "Папка библиотеки:", "lib_dir", self._pick_dir)
+        if not self.lib_dir.text():
+            self.lib_dir.setText(r"D:\Облако\YandexDisk\Progs\KMPS-SET-SMP\Lib")
+        self.lib_scan_btn = QPushButton("Показать переменные моделей")
+        self.lib_scan_btn.clicked.connect(self.run_lib_scan)
+        l1.addWidget(self.lib_scan_btn, 1, 1)
+        layout.addWidget(g1)
+
+        g2 = QGroupBox("2. Вставка копии в проект с новыми значениями (оригинал не меняется)")
+        l2 = QGridLayout(g2)
+        self.lib_model = self._path_row(l2, 0, "Модель из библиотеки:", "lib_model",
+                                        lambda e: self._pick_file(e, "Модели КОМПАС (*.m3d *.a3d)"))
+        self.lib_target = self._path_row(l2, 1, "Папка проекта:", "lib_target", self._pick_dir)
+        self.lib_values = QLineEdit(self.settings.value("lib_values", "D=800; s=8"))
+        self.lib_des_tpl = QLineEdit(self.settings.value("lib_des_tpl", "BTEL.D{D}S{s}"))
+        self.lib_name_tpl = QLineEdit(self.settings.value("lib_name_tpl", "Днище эллиптическое {ISP}-{D}-{s}"))
+        self.lib_preview = QLabel()
+        l2.addWidget(QLabel("Значения переменных:"), 2, 0)
+        l2.addWidget(self.lib_values, 2, 1)
+        l2.addWidget(QLabel("Шаблон обозначения:"), 3, 0)
+        l2.addWidget(self.lib_des_tpl, 3, 1)
+        l2.addWidget(QLabel("Шаблон наименования:"), 4, 0)
+        l2.addWidget(self.lib_name_tpl, 4, 1)
+        hint = QLabel("В шаблонах {Имя} заменяется значением переменной. Пустой шаблон — свойство не меняется.")
+        hint.setWordWrap(True)
+        l2.addWidget(hint, 5, 1)
+        self.lib_insert_btn = QPushButton("Вставить копию в проект")
+        self.lib_insert_btn.clicked.connect(self.run_lib_insert)
+        l2.addWidget(self.lib_insert_btn, 6, 1)
+        layout.addWidget(g2)
+
+        g3 = QGroupBox("3. Переменные, изменённые в сборке на уровне вхождения (только чтение)")
+        l3 = QGridLayout(g3)
+        self.lib_asm = self._path_row(l3, 0, "Сборка (.a3d):", "lib_asm",
+                                      lambda e: self._pick_file(e, "Сборки КОМПАС (*.a3d)"))
+        self.lib_inst_btn = QPushButton("Сравнить переменные вхождений")
+        self.lib_inst_btn.clicked.connect(self.run_lib_instances)
+        l3.addWidget(self.lib_inst_btn, 1, 1)
+        layout.addWidget(g3)
+        layout.addStretch(1)
+        return tab
+
+    def run_lib_scan(self):
+        folder = self.lib_dir.text().strip()
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, APP_TITLE, "Укажите существующую папку библиотеки.")
+            return
+        self.save_settings()
+        self.start("lib_scan", {"folder": folder, "verbose": self.verbose.isChecked(),
+                                "show": self.show_kompas.isChecked()}, "Переменные библиотеки")
+
+    def run_lib_insert(self):
+        model, target = self.lib_model.text().strip(), self.lib_target.text().strip()
+        if not os.path.isfile(model):
+            QMessageBox.warning(self, APP_TITLE, "Выберите модель из библиотеки.")
+            return
+        if not os.path.isdir(target):
+            QMessageBox.warning(self, APP_TITLE, "Укажите существующую папку проекта.")
+            return
+        if os.path.normcase(os.path.dirname(os.path.abspath(model))) == os.path.normcase(os.path.abspath(target)):
+            QMessageBox.warning(self, APP_TITLE, "Папка проекта не должна совпадать с папкой модели в библиотеке.")
+            return
+        try:
+            from naming import parse_values
+
+            parse_values(self.lib_values.text())
+        except ValueError as e:
+            QMessageBox.warning(self, APP_TITLE, str(e))
+            return
+        self.save_settings()
+        self.start("lib_insert", {
+            "model": model, "target_dir": target, "values_text": self.lib_values.text(),
+            "des_template": self.lib_des_tpl.text().strip(), "name_template": self.lib_name_tpl.text().strip(),
+            "show": self.show_kompas.isChecked()}, "Вставка копии")
+
+    def run_lib_instances(self):
+        asm = self.lib_asm.text().strip()
+        if not os.path.isfile(asm) or not asm.lower().endswith(".a3d"):
+            QMessageBox.warning(self, APP_TITLE, "Выберите файл сборки (.a3d).")
+            return
+        self.save_settings()
+        self.start("lib_instances", {"assembly": asm, "show": self.show_kompas.isChecked()}, "Переменные вхождений")
 
     # ---------- выбор файлов ----------
 
@@ -234,8 +360,8 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText("\nГотово.")
 
     def set_busy(self, busy):
-        self.probe_btn.setEnabled(not busy)
-        self.rename_btn.setEnabled(not busy)
+        for btn in (self.probe_btn, self.rename_btn, self.lib_scan_btn, self.lib_insert_btn, self.lib_inst_btn):
+            btn.setEnabled(not busy)
 
     def open_report_folder(self):
         if self.last_report:
@@ -247,6 +373,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("designation", self.des_edit.text())
         self.settings.setValue("name", self.name_edit.text())
         self.settings.setValue("show_kompas", self.show_kompas.isChecked())
+        self.settings.setValue("tab", self.tabs.currentIndex())
+        for key in ("lib_dir", "lib_model", "lib_target", "lib_values", "lib_des_tpl", "lib_name_tpl", "lib_asm"):
+            self.settings.setValue(key, getattr(self, key).text())
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():
