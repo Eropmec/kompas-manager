@@ -175,27 +175,43 @@ def run_instances(assembly, show=False, on_line=None):
     rep = Report(report_path("lib_instances"), on_line)
     rep.line(f"Сборка: {assembly}")
     session = K.Session(show, rep.line)
+    file_vars = {}  # файл компонента -> значения внешних переменных в самом файле
+
+    def vars_in_file(app, path):
+        key = K.norm(path)
+        if key not in file_vars:
+            doc = K.open_doc(app, path, visible=False, readonly=True)
+            try:
+                file_vars[key] = ext_values(K.variables(K.top_part(doc), True, True))
+            finally:
+                K.close_doc(doc)
+        return file_vars[key]
+
+    changed = 0
     try:
-        doc = K.open_doc(session.app, assembly, visible=False, readonly=True)
+        app = session.app
+        doc = K.open_doc(app, assembly, visible=False, readonly=True)
         try:
-            comps = K.components(doc)
-            rep.line(f"Компонентов: {len(comps)}")
-            for c in comps:
-                title = f"{os.path.basename(c.FileName)} ({c.Marking} {c.Name})"
-                with rep.step(title):
-                    in_asm = K.variables(c, True, False)
-                    in_file = K.variables(c, True, True)
-                    show_vars(rep, "в сборке (InSource=False)", in_asm)
-                    show_vars(rep, "в файле компонента (InSource=True)", in_file)
-                    a, f = ext_values(in_asm), ext_values(in_file)
-                    diff = {n: (f.get(n), a[n]) for n in a if f.get(n) != a[n]}
-                    if diff:
-                        rep.line("  ИЗМЕНЕНЫ В СБОРКЕ: " + ", ".join(
-                            f"{n}: {format_number(old)} -> {format_number(new)}" for n, (old, new) in diff.items()))
-                    else:
-                        rep.line("  отличий нет")
+            comps = [(c.FileName, c.Marking, c.Name, ext_values(K.variables(c, True, False))) for c in K.components(doc)]
         finally:
             K.close_doc(doc)
+        rep.line(f"Компонентов: {len(comps)}")
+        for path, marking, name, in_asm in comps:
+            with rep.step(f"{os.path.basename(path)} ({marking} {name})"):
+                if not in_asm:
+                    rep.line("  внешних переменных нет")
+                    continue
+                in_file = vars_in_file(app, path)
+                rep.line("  в сборке: " + ", ".join(f"{n}={format_number(v)}" for n, v in in_asm.items()))
+                rep.line("  в файле:  " + ", ".join(f"{n}={format_number(v)}" for n, v in in_file.items()))
+                diff = {n: (in_file.get(n), v) for n, v in in_asm.items() if in_file.get(n) != v}
+                if diff:
+                    changed += 1
+                    rep.line("  ИЗМЕНЕНЫ В СБОРКЕ: " + ", ".join(
+                        f"{n}: {format_number(old)} -> {format_number(new)}" for n, (old, new) in diff.items()))
+                else:
+                    rep.line("  отличий нет")
+        rep.check("найдены вхождения с переменными, изменёнными в сборке", changed > 0, f"вхождений: {changed}")
     finally:
         session.close(rep.line)
     rep.summary()
