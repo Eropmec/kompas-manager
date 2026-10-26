@@ -48,6 +48,8 @@ jobs:
         run: >
           pyinstaller --noconfirm --onefile --windowed
           --name KompasManager
+          --icon assets/app.ico
+          --add-data "assets/app_256.png;assets"
           --paths .
           --hidden-import kompas_manager.kompas_api
           --hidden-import kompas_manager.ui.workers
@@ -64,6 +66,7 @@ jobs:
         run: >
           pyinstaller --noconfirm --onefile --windowed
           --name KompasProto
+          --icon assets/app.ico
           --paths proto
           --hidden-import probe
           --hidden-import rename_test
