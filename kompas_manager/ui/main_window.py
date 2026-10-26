@@ -40,6 +40,7 @@ from kompas_manager.core.rename_plan import build_plan
 from kompas_manager.core.settings import ProjectSettings
 from kompas_manager.ui.dialogs import FindReplaceDialog, PlanDialog, ProjectSchemeDialog
 from kompas_manager.ui.library_panel import LibraryPanel
+from kompas_manager.ui.workspace_panel import WorkspacePanel
 from kompas_manager.ui.project_tree import COL_DES, COL_NAME, KEY_ROLE, ProjectTreeBuilder, severity_icon
 
 APP_NAME = "Менеджер проектов КОМПАС"
@@ -93,6 +94,8 @@ class MainWindow(QMainWindow):
         self.act_show_kompas.setChecked(self.settings.value("show_kompas", False, type=bool))
         self.act_show_kompas.toggled.connect(lambda v: self.settings.setValue("show_kompas", v))
 
+        self.act_settings = QAction("Настройки…", self)
+        self.act_settings.triggered.connect(self.edit_settings)
         self.act_clear_cache = QAction("Очистить кэш сканирования", self)
         self.act_clear_cache.triggered.connect(self.clear_cache)
 
@@ -112,6 +115,10 @@ class MainWindow(QMainWindow):
         self.act_rollback = QAction("Откатить последнее переобозначение…", self)
         self.act_rollback.triggered.connect(self.rollback)
 
+        self.act_new_product = QAction(style.standardIcon(QStyle.SP_FileDialogNewFolder), "Новое изделие…", self)
+        self.act_new_product.setShortcut(QKeySequence.New)
+        self.act_new_product.triggered.connect(self._new_product_here)
+
         self.act_exit = QAction("Выход", self)
         self.act_exit.triggered.connect(self.close)
 
@@ -120,6 +127,7 @@ class MainWindow(QMainWindow):
 
         menu = self.menuBar()
         m_file = menu.addMenu("Файл")
+        m_file.addAction(self.act_new_product)
         m_file.addAction(self.act_open)
         self.menu_recent = m_file.addMenu("Недавние проекты")
         m_file.addSeparator()
@@ -144,6 +152,7 @@ class MainWindow(QMainWindow):
         m_des.addAction(self.act_rollback)
 
         m_tools = menu.addMenu("Сервис")
+        m_tools.addAction(self.act_settings)
         m_tools.addAction(self.act_show_kompas)
         m_tools.addAction(self.act_clear_cache)
 
@@ -153,6 +162,7 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("Основная")
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        toolbar.addAction(self.act_new_product)
         toolbar.addAction(self.act_open)
         toolbar.addAction(self.act_refresh)
         toolbar.addSeparator()
@@ -216,8 +226,19 @@ class MainWindow(QMainWindow):
         self.library.insert_requested.connect(self.insert_element)
         self.library.passport_requested.connect(self.edit_passport)
         self.main_tabs.addTab(self.library, "Библиотека")
-        self.setCentralWidget(self.main_tabs)
+        self.workspace = WorkspacePanel()
+        self.workspace.open_requested.connect(self.open_project)
+        self.workspace.new_product_requested.connect(self.new_product)
+        self.workspace.folder_copied.connect(self.check_copied_folder)
+        outer = QSplitter(Qt.Horizontal)
+        outer.addWidget(self.workspace)
+        outer.addWidget(self.main_tabs)
+        outer.setStretchFactor(0, 1)
+        outer.setStretchFactor(1, 4)
+        outer.setSizes([280, 1100])
+        self.setCentralWidget(outer)
         self.library.reload()
+        self.node_clip = None  # (проект, ключ узла) для переноса в другой проект
 
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(260)
@@ -423,8 +444,15 @@ class MainWindow(QMainWindow):
             act.setCheckable(True)
             act.setChecked(self.proj_settings.is_excluded(self.project.root, key))
             act.toggled.connect(lambda v: self._set_excluded(key, v))
-        if d is not None and d.kind == "assembly" and p.inside(key) and self.worker is None:
+        if d is not None and d.kind in ("part", "assembly") and p.inside(key) and self.worker is None:
             menu.addSeparator()
+            menu.addAction("Копировать узел для другого проекта", lambda: self._copy_node(key))
+        if d is not None and d.kind == "assembly" and p.inside(key) and self.worker is None:
+            if self.node_clip is not None:
+                src_project, src_key = self.node_clip
+                src_doc = src_project.doc(src_key)
+                menu.addAction(f"Вставить узел «{src_doc.designation} {src_doc.name}» в эту сборку…",
+                               lambda: self._paste_node(key))
             menu.addAction("Вынести изменённые в сборке вхождения в файлы…", lambda: self.extract_instances(key))
         issues = p.issues_by_key.get(key, [])
         if issues:
@@ -833,6 +861,111 @@ class MainWindow(QMainWindow):
             self.scan(force=False)
 
         self._run_call(fn, done, "Вынос вхождений в файлы")
+
+    # ---------- структура и перенос ----------
+
+    def _new_product_here(self):
+        index = self.workspace.tree.currentIndex()
+        folder = self.workspace.path_at(index) if index.isValid() else self.workspace.root()
+        if not os.path.isdir(folder):
+            QMessageBox.information(self, APP_NAME, "Укажите рабочую папку слева.")
+            return
+        self.new_product(folder)
+
+    def edit_settings(self):
+        from kompas_manager.ui.dialogs import SettingsDialog
+
+        SettingsDialog(self.settings, self).exec()
+
+    def new_product(self, parent_folder):
+        from kompas_manager.ui.structure_dialog import StructureDialog
+
+        if self.worker is not None:
+            return
+        dlg = StructureDialog(parent_folder, self)
+        if not dlg.exec():
+            return
+        folder = dlg.folder()
+        items = dlg.items
+        settings = dlg.project_settings()
+        os.makedirs(folder, exist_ok=True)
+        try:
+            settings.save(folder)
+        except OSError as e:
+            self.log.appendPlainText(f"Настройки изделия не сохранены: {e}")
+        templates = {"part": self.settings.value("template_part", ""),
+                     "assembly": self.settings.value("template_asm", "")}
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.structure_ops import create_structure
+
+            return create_structure(K, items, templates, show=show, log=log)
+
+        def done(created):
+            self.statusBar().showMessage(f"Создано файлов: {len(created)}", 8000)
+            self.workspace.select(folder)
+            self.proj_settings = None
+            self.project_root = None
+            self.open_project(folder)
+
+        self._run_call(fn, done, f"Создание изделия: {os.path.basename(folder)}")
+
+    def check_copied_folder(self, old, new):
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.structure_ops import relink_copied_folder
+
+            return relink_copied_folder(K, old, new, show=show, log=log)
+
+        def done(n):
+            msg = (f"Папка скопирована. Ссылок, которые вели в оригинал, перепривязано: {n}." if n else
+                   "Папка скопирована. Все ссылки копии ведут на её собственные файлы или в библиотеку.")
+            QMessageBox.information(self, APP_NAME, msg + f"\n\n{new}")
+
+        from kompas_manager.ui.workspace_panel import has_kompas_files
+        from kompas_manager.scanner import list_files
+
+        if not list_files(new) and not has_kompas_files(new):
+            return  # в папке нет файлов КОМПАСа — проверять нечего
+        self._run_call(fn, done, "Проверка ссылок в копии")
+
+    def _copy_node(self, key):
+        self.node_clip = (self.project, key)
+        d = self.project.doc(key)
+        self.statusBar().showMessage(
+            f"Узел «{d.designation} {d.name}» скопирован. Откройте другое изделие и вставьте его в сборку "
+            "через правую кнопку мыши.", 10000)
+
+    def _paste_node(self, target_key):
+        from kompas_manager.core.transfer import plan_transfer
+
+        src_project, src_key = self.node_clip
+        target_asm = self._path(target_key)
+        target_dir = os.path.dirname(target_asm)
+        plan = plan_transfer(src_project, src_key, target_dir)
+        if plan.problems:
+            QMessageBox.warning(self, APP_NAME, "Вставить нельзя:\n" + "\n".join(plan.problems[:15]))
+            return
+        files = "\n".join("  " + os.path.relpath(v, target_dir) for v in plan.files.values())
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"Скопировать в {target_dir} файлы ({len(plan.files)}):\n{files}\n\n"
+            f"и вставить узел в сборку «{os.path.basename(target_asm)}»?\n\n"
+            "Ссылки внутри копий будут перепривязаны. Обозначения останутся прежними — "
+            "чтобы пронумеровать узел по схеме этого проекта, затем нажмите «Применить схему».")
+        if answer != QMessageBox.Yes:
+            return
+        root = self.project.root
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.structure_ops import transfer
+
+            return transfer(K, plan, root, target_asm, show=show, log=log)
+
+        self._run_call(fn, lambda _r: self.scan(force=False), "Вставка узла")
 
     # ---------- прочее ----------
 

@@ -387,3 +387,52 @@ class PlanDialog(QDialog):
         layout.addWidget(note)
         layout.addWidget(buttons)
         self.table.setFocus(Qt.OtherFocusReason)
+
+
+class SettingsDialog(QDialog):
+    """Общие настройки: шаблоны новых деталей и сборок."""
+
+    def __init__(self, qsettings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки")
+        self.resize(640, 180)
+        self.q = qsettings
+        self.edits = {}
+        form = QFormLayout()
+        for key, label, flt in (("template_part", "Шаблон детали:", "Детали КОМПАС (*.m3d)"),
+                                ("template_asm", "Шаблон сборки:", "Сборки КОМПАС (*.a3d)")):
+            edit = QLineEdit(self.q.value(key, ""))
+            edit.setPlaceholderText("пусто — стандартный пустой документ КОМПАСа")
+            btn = QPushButton("Обзор…")
+            btn.clicked.connect(lambda _=False, e=edit, f=flt: self._pick(e, f))
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(btn)
+            form.addRow(label, row)
+            self.edits[key] = edit
+        note = QLabel("Шаблоны используются при создании файлов новой структуры изделия. "
+                      "Обозначение и наименование программа задаёт сама.")
+        note.setWordWrap(True)
+        buttons = russian_buttons(QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel))
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def _pick(self, edit, flt):
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(self, "Шаблон", edit.text() or os.path.expanduser("~"), flt)
+        if path:
+            edit.setText(os.path.normpath(path))
+
+    def _save(self):
+        for key, edit in self.edits.items():
+            path = edit.text().strip()
+            if path and not os.path.isfile(path):
+                QMessageBox.warning(self, self.windowTitle(), f"Файл не найден:\n{path}")
+                return
+            self.q.setValue(key, path)
+        self.accept()

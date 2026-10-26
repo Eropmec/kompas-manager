@@ -232,6 +232,53 @@ def components(doc):
     return list(items(top_part(doc).Parts, "Part"))
 
 
+# ---------- создание документов и компонентов ----------
+
+DOC_TYPES = {".m3d": ("ksDocumentPart", 4), ".a3d": ("ksDocumentAssembly", 5)}
+
+
+def new_doc(app, path, visible=False):
+    """Создать пустой документ КОМПАСа по расширению пути и сохранить его."""
+    const_name, fallback = DOC_TYPES[ext_of(path)]
+    doc = app.Documents.Add(getattr(const, const_name, fallback), visible)
+    if doc is None:
+        raise RuntimeError(f"Не удалось создать документ {const_name}")
+    doc.SaveAs(path)
+    return doc
+
+
+def add_component(doc, path, log=print):
+    """Вставить компонент из файла в сборку. Возвращает способ, которым удалось вставить."""
+    parts = top_part(doc).Parts
+    errors = []
+    for how, call in (
+        ("API7 IParts7.AddFromFile(путь, True, True)", lambda: parts.AddFromFile(path, True, True)),
+        ("API7 IParts7.AddFromFile(путь, True)", lambda: parts.AddFromFile(path, True)),
+    ):
+        try:
+            part = call()
+            if part is not None:
+                try:
+                    part.Update()
+                except Exception:
+                    pass
+                return how
+        except Exception as e:
+            errors.append(f"{how}: {e}")
+    try:
+        k5 = connect5()
+        doc.Active = True
+        d5 = k5.ActiveDocument3D()
+        if d5.SetPartFromFile(path, d5.GetPart(-1), True):  # -1: верхний уровень сборки
+            return "API5 ksDocument3D.SetPartFromFile"
+        errors.append("API5 SetPartFromFile вернул False")
+    except Exception as e:
+        errors.append(f"API5 SetPartFromFile: {e}")
+    for e in errors:
+        log("  " + e)
+    raise RuntimeError("Компонент не вставился")
+
+
 # ---------- переменные 3D ----------
 
 def _wrap(obj, iface):
