@@ -21,7 +21,7 @@ def setup(root):
         doc(root, "Г.000.01 - Корпус.m3d", "part", "Г.000.01", "Корпус"),
     ]
     for d in docs:
-        with open(d.path, "w") as f:
+        with open(d.path, "w", encoding="utf-8") as f:
             f.write(os.path.basename(d.path))
         FILES[norm(d.path)] = {"des": d.designation, "name": d.name, "refs": list(d.refs)}
     return Project(root, docs)
