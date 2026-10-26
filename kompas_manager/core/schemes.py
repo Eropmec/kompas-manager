@@ -60,6 +60,24 @@ class Scheme:
 
         return FIELD_RE.sub(repl, self.template)
 
+    def parse(self, designation, code):
+        """Разобрать обозначение по шаблону: (номер сборки, номер детали) или None."""
+        pattern, pos = "", 0
+        for m in FIELD_RE.finditer(self.template):
+            pattern += re.escape(self.template[pos:m.start()])
+            name, width = m.group(1), m.group(2)
+            if name == "код":
+                pattern += re.escape(code)
+            else:
+                group = "asm" if name == "сборка" else "part"
+                pattern += f"(?P<{group}>\\d{{{width}}})" if width else f"(?P<{group}>\\d+)"
+            pos = m.end()
+        pattern += re.escape(self.template[pos:])
+        m = re.fullmatch(pattern, (designation or "").strip())
+        if not m:
+            return None
+        return int(m.group("asm")), int(m.group("part"))
+
     def to_dict(self):
         return asdict(self)
 

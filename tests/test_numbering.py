@@ -80,3 +80,10 @@ def test_settings_roundtrip(tmp_path):
     s2.rename_paths(root, {key: os.path.join(root, "sub", "b.m3d")})
     assert s2.pins == {"sub/b.m3d": {"деталь": 3}}
     assert s2.excluded == ["sub/b.m3d"]
+
+
+def test_scheme_parse():
+    s = Scheme("x", "{код}.{сборка:3}.{деталь:2}")
+    assert s.parse("АБВГ.001.02", "АБВГ") == (1, 2)
+    assert s.parse("АБВГ.001.02 СБ", "АБВГ") is None
+    assert s.parse("ДРУГОЙ.001.02", "АБВГ") is None

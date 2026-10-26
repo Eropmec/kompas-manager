@@ -446,6 +446,13 @@ class MainWindow(QMainWindow):
             act.toggled.connect(lambda v: self._set_excluded(key, v))
         if d is not None and d.kind in ("part", "assembly") and p.inside(key) and self.worker is None:
             menu.addSeparator()
+            if d.kind == "assembly":
+                menu.addAction("Добавить детали и сборки…", lambda: self.append_items(key))
+            parent_key = self._parent_key_at(self.tree.indexAt(pos))
+            if parent_key:
+                menu.addAction("Удалить из сборки…", lambda: self.delete_from_assembly(parent_key, key))
+            menu.addAction("Версии узла…", lambda: self.node_versions(key))
+            menu.addSeparator()
             menu.addAction("Копировать узел для другого проекта", lambda: self._copy_node(key))
         if d is not None and d.kind == "assembly" and p.inside(key) and self.worker is None:
             if self.node_clip is not None:
@@ -864,11 +871,95 @@ class MainWindow(QMainWindow):
 
     # ---------- структура и перенос ----------
 
+    def _parent_key_at(self, proxy_index):
+        parent = proxy_index.parent()
+        if not parent.isValid():
+            return None
+        key = self._key_at(parent)
+        d = self.project.doc(key) if key else None
+        return key if d is not None and d.kind == "assembly" and self.project.inside(key) else None
+
+    def _templates(self):
+        return {"part": self.settings.value("template_part", ""), "assembly": self.settings.value("template_asm", "")}
+
+    def append_items(self, key):
+        from kompas_manager.ui.structure_dialog import StructureDialog
+
+        if self.pending and not self._confirm_discard():
+            return
+        dlg = StructureDialog(self.project.root, self, existing=(self.project, key, self.proj_settings))
+        if not dlg.exec() or dlg.append_plan is None:
+            return
+        plan, root, templates = dlg.append_plan, self.project.root, self._templates()
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.editing_ops import append_to_assembly
+
+            return append_to_assembly(K, root, plan, templates, show=show, log=log)
+
+        self.pending = {}
+        self._run_call(fn, lambda _r: self.scan(force=False), "Добавление в сборку")
+
+    def delete_from_assembly(self, parent_key, key):
+        from kompas_manager.core.editing import plan_delete
+
+        p = self.project
+        d, pd = p.doc(key), p.doc(parent_key)
+        plan = plan_delete(p, parent_key, key)
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QMessageBox.Question)
+        text = (f"Удалить «{d.designation} {d.name}» из сборки «{pd.designation} {pd.name}» "
+                f"(вхождений: {plan.instances})?")
+        if plan.files:
+            text += ("\n\nФайлы, которые больше нигде в изделии не используются:\n"
+                     + "\n".join("  " + p.display_path(norm(f))
+                                  for f in plan.files))
+        if plan.kept:
+            text += "\n\nОстаются (используются в других сборках):\n" + "\n".join("  " + os.path.basename(f) for f in plan.kept)
+        text += "\n\nПеред изменением сборка и файлы копируются в _backup; откат — «Обозначения → Откатить последнее»."
+        box.setText(text)
+        with_files = box.addButton("Удалить вхождения и файлы", QMessageBox.DestructiveRole) if plan.files else None
+        only = box.addButton("Только из сборки", QMessageBox.AcceptRole)
+        box.addButton("Отмена", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked not in (with_files, only) or clicked is None:
+            return
+        if clicked is only:
+            plan.files = []
+        root = p.root
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.editing_ops import delete_from_assembly
+
+            return delete_from_assembly(K, root, plan, show=show, log=log)
+
+        self._run_call(fn, lambda _r: self.scan(force=False), "Удаление из сборки")
+
+    def node_versions(self, key):
+        from kompas_manager.ui.versions_dialog import VersionsDialog
+
+        dlg = VersionsDialog(self.project, key, self)
+        if not dlg.exec() or dlg.restore_plan is None:
+            return
+        plan, project, move = dlg.restore_plan, self.project, dlg.move_orphans
+        show = self.act_show_kompas.isChecked()
+
+        def fn(K, log):
+            from kompas_manager.editing_ops import restore_version
+
+            return restore_version(K, project, plan, move_orphans=move, show=show, log=log)
+
+        self.pending = {}
+        self._run_call(fn, lambda _r: self.scan(force=False), "Восстановление версии")
+
     def _new_product_here(self):
-        index = self.workspace.tree.currentIndex()
-        folder = self.workspace.path_at(index) if index.isValid() else self.workspace.root()
-        if not os.path.isdir(folder):
-            QMessageBox.information(self, APP_NAME, "Укажите рабочую папку слева.")
+        folder = self.workspace.current_folder()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.information(self, APP_NAME, "Выберите слева раздел или папку проекта.")
             return
         self.new_product(folder)
 

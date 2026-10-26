@@ -279,6 +279,25 @@ def add_component(doc, path, log=print):
     raise RuntimeError("Компонент не вставился")
 
 
+def delete_component(part, log=print):
+    """Удалить вхождение компонента из сборки. Возвращает способ, которым удалось."""
+    errors = []
+    for how, call in (
+        ("API7 IModelObject.Delete()", lambda: cast(part, api7.IModelObject).Delete()),
+        ("API7 IPart7.Delete()", lambda: part.Delete()),
+    ):
+        try:
+            result = call()
+            if result is not False:
+                return how
+            errors.append(f"{how}: вернул False")
+        except Exception as e:
+            errors.append(f"{how}: {e}")
+    for e in errors:
+        log("  " + e)
+    raise RuntimeError("Компонент не удалился")
+
+
 # ---------- переменные 3D ----------
 
 def _wrap(obj, iface):

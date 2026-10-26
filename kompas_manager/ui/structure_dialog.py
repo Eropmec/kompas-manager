@@ -33,14 +33,17 @@ COL_NAME, COL_COUNT, COL_DES = 0, 1, 2
 
 
 class StructureDialog(QDialog):
-    def __init__(self, parent_folder, parent=None):
+    def __init__(self, parent_folder, parent=None, existing=None):
+        """existing = (проект, ключ сборки, настройки проекта) — режим добавления в готовую сборку."""
         super().__init__(parent)
         self.setWindowTitle("Новое изделие")
         self.resize(820, 640)
         self.parent_folder = parent_folder
+        self.existing = existing
+        self.append_plan = None
         self.items = []
         self.problems = []
-        self.settings = ProjectSettings.load(parent_folder)  # схема ближайшего проекта, если есть
+        self.settings = existing[2] if existing else ProjectSettings.load(parent_folder)
 
         self.product = QLineEdit("Изделие")
         self.product.textChanged.connect(self._root_name_changed)
@@ -102,6 +105,18 @@ class StructureDialog(QDialog):
         self.ok.setText("Создать файлы")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
+
+        if existing:
+            project, key, _settings = existing
+            d = project.doc(key)
+            self.setWindowTitle(f"Добавить в сборку — {d.designation} {d.name}")
+            for w in (self.product, self.in_place, self.scheme, self.code):
+                form.setRowVisible(w, False)
+            self.root_item.setText(COL_NAME, d.name)
+            self.root_item.setText(COL_DES, d.designation)
+            self.root_item.setFlags(self.root_item.flags() & ~Qt.ItemIsEditable)
+            self.ok.setText("Создать и добавить")
+            self.tree.setHeaderLabels(["Наименование", "Кол.", "Обозначение (следующие свободные номера)"])
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -197,17 +212,24 @@ class StructureDialog(QDialog):
         return node(self.root_item)
 
     def folder(self):
+        if self.existing:
+            project, key, _s = self.existing
+            return os.path.dirname(project.raw_paths.get(key, key))
         if self.in_place.isChecked():
             return self.parent_folder
         return os.path.join(self.parent_folder, self.product.text().strip() or "Изделие")
 
     def project_settings(self):
+        if self.existing:
+            return self.existing[2]
         s = ProjectSettings.load(self.parent_folder)
         s.scheme = self.schemes[self.scheme.currentIndex()]
         s.code = self.code.text().strip()
         return s
 
     def _update(self):
+        if self.existing:
+            return self._update_append()
         self.tree.blockSignals(True)
         root = self.build_nodes()
         settings = self.project_settings()
@@ -229,7 +251,34 @@ class StructureDialog(QDialog):
         self.preview.setText(text)
         self.ok.setEnabled(not self.problems)
 
+    def _update_append(self):
+        from kompas_manager.core.editing import plan_append
+
+        project, key, settings = self.existing
+        root = self.build_nodes()
+        self.root_node = root
+        if not root.children:
+            self.items, self.problems, self.append_plan = [], ["Добавьте хотя бы одну деталь или сборку"], None
+        else:
+            self.append_plan = plan_append(project, key, root.children, settings, self.folder())
+            self.items, self.problems = self.append_plan.items, self.append_plan.problems
+        self.tree.blockSignals(True)
+        by_node = {id(it.node): it.designation for it in self.items}
+        for n in root.walk():
+            if n is not root:
+                n._item.setText(COL_DES, by_node.get(id(n), ""))
+        self.tree.blockSignals(False)
+        parts = sum(1 for i in self.items if i.node.kind == "part")
+        text = f"Будет создано: сборок {len(self.items) - parts}, деталей {parts}"
+        if self.problems:
+            text += "<br><span style='color:#b00'>" + "<br>".join(html.escape(p) for p in self.problems) + "</span>"
+        self.preview.setText(text)
+        self.ok.setEnabled(not self.problems)
+
     def _accept(self):
+        if self.existing:
+            self.accept()
+            return
         if not self.in_place.isChecked() and os.path.exists(self.folder()):
             QMessageBox.warning(self, self.windowTitle(), "Папка изделия уже существует. Измените наименование "
                                 "или отметьте «Создать файлы прямо в выбранной папке».")
