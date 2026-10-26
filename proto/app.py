@@ -53,6 +53,11 @@ class Worker(QThread):
                 import probe
 
                 report_path = probe.run(on_line=self.line.emit, **self.kwargs)
+            elif self.task.startswith("proj_"):
+                import copy_test
+
+                func = getattr(copy_test, "run_" + self.task[5:])
+                report_path = func(on_line=self.line.emit, **self.kwargs)
             elif self.task.startswith("lib_"):
                 import lib_test
 
@@ -130,7 +135,8 @@ class MainWindow(QMainWindow):
         self.update_preview()
         layout.addStretch(1)
         self.tabs.addTab(self._build_library_tab(), "Библиотека")
-        self.tabs.setCurrentIndex(int(self.settings.value("tab", 1)))
+        self.tabs.addTab(self._build_projects_tab(), "Проекты")
+        self.tabs.setCurrentIndex(2)
         layout = root_layout
 
         # --- Общая настройка
@@ -232,6 +238,61 @@ class MainWindow(QMainWindow):
         layout.addWidget(g3)
         layout.addStretch(1)
         return tab
+
+    def _build_projects_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        g1 = QGroupBox("1. Копирование папки проекта: куда ведут ссылки копии и перепривязка (оригинал не меняется)")
+        l1 = QGridLayout(g1)
+        self.proj_copy_src = self._path_row(l1, 0, "Папка тестового проекта:", "proj_copy_src", self._pick_dir)
+        note = QLabel("Рядом создаётся копия папки с суффиксом _copytest и датой. Все проверки и перепривязка — только в копии.")
+        note.setWordWrap(True)
+        l1.addWidget(note, 1, 1)
+        self.proj_copy_btn = QPushButton("Скопировать и проверить ссылки")
+        self.proj_copy_btn.clicked.connect(self.run_proj_copy)
+        l1.addWidget(self.proj_copy_btn, 2, 1)
+        layout.addWidget(g1)
+
+        g2 = QGroupBox("2. Создание структуры: сборка и две детали, вставка компонентов")
+        l2 = QGridLayout(g2)
+        self.proj_struct_dir = self._path_row(l2, 0, "Папка для теста:", "proj_struct_dir", self._pick_dir)
+        self.proj_part_tpl = self._path_row(l2, 1, "Шаблон детали (необяз.):", "proj_part_tpl",
+                                            lambda e: self._pick_file(e, "Детали КОМПАС (*.m3d)"))
+        self.proj_asm_tpl = self._path_row(l2, 2, "Шаблон сборки (необяз.):", "proj_asm_tpl",
+                                           lambda e: self._pick_file(e, "Сборки КОМПАС (*.a3d)"))
+        note2 = QLabel("Без шаблонов создаются стандартные пустые документы КОМПАСа. "
+                       "Тест создаёт подпапку «Структура» с датой и файлами ТЕСТ.000.00 - Сборка, ТЕСТ.000.01 - Корпус, ТЕСТ.000.02 - Крышка.")
+        note2.setWordWrap(True)
+        l2.addWidget(note2, 3, 1)
+        self.proj_struct_btn = QPushButton("Создать структуру")
+        self.proj_struct_btn.clicked.connect(self.run_proj_structure)
+        l2.addWidget(self.proj_struct_btn, 4, 1)
+        layout.addWidget(g2)
+        layout.addStretch(1)
+        return tab
+
+    def run_proj_copy(self):
+        src = self.proj_copy_src.text().strip()
+        if not os.path.isdir(src):
+            QMessageBox.warning(self, APP_TITLE, "Укажите существующую папку тестового проекта.")
+            return
+        self.save_settings()
+        self.start("proj_copy", {"project": src, "show": self.show_kompas.isChecked()}, "Копирование проекта")
+
+    def run_proj_structure(self):
+        folder = self.proj_struct_dir.text().strip()
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, APP_TITLE, "Укажите существующую папку для теста.")
+            return
+        for edit in (self.proj_part_tpl, self.proj_asm_tpl):
+            if edit.text().strip() and not os.path.isfile(edit.text().strip()):
+                QMessageBox.warning(self, APP_TITLE, f"Файл шаблона не найден:\n{edit.text()}")
+                return
+        self.save_settings()
+        self.start("proj_structure", {"folder": folder, "part_template": self.proj_part_tpl.text().strip(),
+                                      "asm_template": self.proj_asm_tpl.text().strip(),
+                                      "show": self.show_kompas.isChecked()}, "Создание структуры")
 
     def run_lib_scan(self):
         folder = self.lib_dir.text().strip()
@@ -360,7 +421,8 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText("\nГотово.")
 
     def set_busy(self, busy):
-        for btn in (self.probe_btn, self.rename_btn, self.lib_scan_btn, self.lib_insert_btn, self.lib_inst_btn):
+        for btn in (self.probe_btn, self.rename_btn, self.lib_scan_btn, self.lib_insert_btn, self.lib_inst_btn,
+                    self.proj_copy_btn, self.proj_struct_btn):
             btn.setEnabled(not busy)
 
     def open_report_folder(self):
@@ -374,7 +436,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("name", self.name_edit.text())
         self.settings.setValue("show_kompas", self.show_kompas.isChecked())
         self.settings.setValue("tab", self.tabs.currentIndex())
-        for key in ("lib_dir", "lib_model", "lib_target", "lib_values", "lib_des_tpl", "lib_name_tpl", "lib_asm"):
+        for key in ("lib_dir", "lib_model", "lib_target", "lib_values", "lib_des_tpl", "lib_name_tpl", "lib_asm",
+                    "proj_copy_src", "proj_struct_dir", "proj_part_tpl", "proj_asm_tpl"):
             self.settings.setValue(key, getattr(self, key).text())
 
     def closeEvent(self, event):
