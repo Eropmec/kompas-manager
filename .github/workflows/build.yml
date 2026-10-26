@@ -25,7 +25,18 @@ jobs:
           pip install -r requirements.txt pyinstaller pytest
 
       - name: Тесты
-        run: python -m pytest -q tests
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q tests -rfE --tb=line > pytest.txt 2>&1
+          code=$?
+          cat pytest.txt
+          if [ $code -ne 0 ]; then
+            grep -E "^(FAILED|ERROR)|^[A-Za-z]:\\.*:[0-9]+: |^E  " pytest.txt | head -30 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
+          exit $code
 
       - name: Проверка импорта модулей
         run: |
