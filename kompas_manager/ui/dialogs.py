@@ -472,3 +472,76 @@ class LevelUpDialog(QDialog):
 
     def values(self):
         return self.des.text().strip(), self.name.text().strip()
+
+
+class GroupEditDialog(QDialog):
+    """Изменить наименования и обозначения нескольких выделенных элементов сразу."""
+
+    MODES = [("keep", "Не менять"), ("replace", "Заменить текст"), ("prefix", "Добавить в начало"),
+             ("suffix", "Добавить в конец"), ("set", "Задать одинаковое")]
+
+    def __init__(self, values, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Изменить выделенные ({len(values)})")
+        self.resize(760, 520)
+        self.values = values
+        self.mode = QComboBox()
+        for key, title in self.MODES:
+            self.mode.addItem(title, key)
+        self.name_find = QLineEdit()
+        self.name_find.setPlaceholderText("что заменить")
+        self.name_text = QLineEdit()
+        self.name_text.setPlaceholderText("новый текст")
+        self.des_find = QLineEdit()
+        self.des_find.setPlaceholderText("что заменить в обозначении")
+        self.des_repl = QLineEdit()
+        self.des_repl.setPlaceholderText("на что")
+        self.case = QCheckBox("Учитывать регистр")
+        form = QFormLayout()
+        form.addRow("Наименование:", self.mode)
+        form.addRow("Найти:", self.name_find)
+        form.addRow("Текст:", self.name_text)
+        form.addRow("Обозначение — найти:", self.des_find)
+        form.addRow("Обозначение — заменить на:", self.des_repl)
+        form.addRow("", self.case)
+        self.preview = QTreeWidget()
+        self.preview.setRootIsDecorated(False)
+        self.preview.setHeaderLabels(["Обозначение", "Наименование", "Станет: обозначение", "Станет: наименование"])
+        for w in (self.mode, self.name_find, self.name_text, self.des_find, self.des_repl, self.case):
+            (w.currentIndexChanged if isinstance(w, QComboBox) else
+             w.toggled if isinstance(w, QCheckBox) else w.textChanged).connect(self._update)
+        buttons = russian_buttons(QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel))
+        buttons.button(QDialogButtonBox.Ok).setText("Применить")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self.preview, 1)
+        note = QLabel("Изменения попадут в ожидающие (синим); в файлы они запишутся при «Переобозначить».")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+        self._update()
+
+    def result_values(self):
+        from kompas_manager.core.bulk import group_edit
+
+        return group_edit(self.values, self.mode.currentData(), self.name_text.text(), self.name_find.text(),
+                          self.des_find.text(), self.des_repl.text(), self.case.isChecked())
+
+    def _update(self, *_):
+        mode = self.mode.currentData()
+        self.name_find.setEnabled(mode == "replace")
+        self.name_text.setEnabled(mode != "keep")
+        self.preview.clear()
+        new = self.result_values()
+        for k, (des, name) in self.values.items():
+            nd, nn = new[k]
+            it = QTreeWidgetItem([des, name, nd if nd != des else "", nn if nn != name else ""])
+            for c in (2, 3):
+                f = it.font(c)
+                f.setBold(True)
+                it.setFont(c, f)
+            self.preview.addTopLevelItem(it)
+        for c in range(4):
+            self.preview.resizeColumnToContents(c)

@@ -18,11 +18,13 @@ from kompas_manager.structure_ops import relink_files, transfer
 LINKED = (".a3d", ".cdw", ".spw")
 
 
-def localize(K, root, docs, show=False, log=print, backup=True):
+def localize(K, root, docs, show=False, log=print, backup=True, known=None):
     """Сделать документы docs (и всё, на что они ссылаются) независимыми от файлов вне изделия.
-    Возвращает (созданные файлы, отсутствующие внешние файлы)."""
+    known — {norm-путь внешнего файла: уже сделанная копия в изделии} (по реестру происхождения).
+    Возвращает (созданные файлы, отсутствующие внешние файлы, {копия: исходный файл})."""
     placement = Placement(root)
-    mapping, referrers, created, missing = {}, [], [], []
+    known = {k: v for k, v in (known or {}).items() if os.path.exists(v)}
+    mapping, referrers, created, missing, sources = {}, [], [], [], {}
     queue = [d for d in dict.fromkeys(docs) if os.path.splitext(d)[1].lower() in LINKED]
     seen = set()
     session = K.Session(show, log)
@@ -47,12 +49,15 @@ def localize(K, root, docs, show=False, log=print, backup=True):
                     continue
                 has_external = True
                 nk = norm(r)
+                if nk not in mapping and nk in known:
+                    mapping[nk] = known[nk]
                 if nk not in mapping:
                     target, reuse = placement.target(r, path)
                     if not reuse:
                         os.makedirs(os.path.dirname(target), exist_ok=True)
                         shutil.copy2(r, target)
                         created.append(target)
+                        sources[target] = r
                         log(f"  скопирован в изделие: {os.path.relpath(target, root)}")
                         if os.path.splitext(target)[1].lower() in LINKED:
                             queue.append(target)  # у копии свои внешние ссылки (библиотечная сборка)
@@ -61,23 +66,24 @@ def localize(K, root, docs, show=False, log=print, backup=True):
                 referrers.append(path)
         if not mapping:
             log("Внешних ссылок нет — изделие автономно")
-            return created, missing
+            return created, missing, sources
         if backup:
             originals = [p for p in referrers if p not in created]
             if originals:
                 Backup.create(root, originals, "Перенос внешних файлов в изделие")
         n = relink_files(K, app, referrers, mapping, log)
         log(f"Перепривязано ссылок: {n}; скопировано файлов: {len(created)}")
-        return created, missing
+        return created, missing, sources
     finally:
         session.close(log)
 
 
-def paste_node(K, root, plan, target_assembly, show=False, log=print):
-    """Скопировать узел другого изделия в сборку и отвязать его от всех прежних файлов."""
+def paste_node(K, root, plan, target_assembly, show=False, log=print, known=None):
+    """Скопировать узел другого изделия в сборку и отвязать его от всех прежних файлов.
+    Возвращает (новый головной файл узла, созданные файлы, отсутствующие, {копия внешнего файла: источник})."""
     created = transfer(K, plan, root, target_assembly, show=show, log=log)
-    more, missing = localize(K, root, created, show=show, log=log, backup=False)
-    return plan.new_root, created + more, missing
+    more, missing, sources = localize(K, root, created, show=show, log=log, backup=False, known=known)
+    return plan.new_root, created + more, missing, sources
 
 
 def level_up(K, folder, designation, name, head_path, show=False, log=print):
@@ -100,13 +106,16 @@ def level_up(K, folder, designation, name, head_path, show=False, log=print):
         session.close(log)
 
 
-def insert_library(K, root, plan, element, target_assembly, count=1, show=False, log=print):
-    """Копия библиотечного элемента (или существующий файл того же типоразмера) — сразу в сборку."""
+def insert_library(K, root, plan, element, target_assembly, count=1, show=False, log=print, known=None):
+    """Копия библиотечного элемента (или существующий файл того же типоразмера) — сразу в сборку.
+    Возвращает (путь в изделии, {копии состава библиотечной сборки: источник})."""
     from kompas_manager.library_ops import insert_copy
 
     path = insert_copy(K, plan, element, show=show, log=log)
+    sources = {}
     if os.path.splitext(path)[1].lower() == ".a3d" and not plan.reuse:
-        localize(K, root, [path], show=show, log=log, backup=False)  # состав библиотечной сборки — в изделие
+        # состав библиотечной сборки — в изделие
+        _c, _m, sources = localize(K, root, [path], show=show, log=log, backup=False, known=known)
     Backup.create(root, [target_assembly], "Вставка из библиотеки")
     session = K.Session(show, log)
     try:
@@ -120,4 +129,4 @@ def insert_library(K, root, plan, element, target_assembly, count=1, show=False,
     finally:
         session.close(log)
     log(f"Вставлено в {os.path.basename(target_assembly)}: {os.path.basename(path)} × {max(1, count)}")
-    return path
+    return path, sources

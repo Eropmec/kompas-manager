@@ -111,7 +111,7 @@ class MainWindow(QMainWindow):
         self.act_reset.triggered.connect(self.reset_pending)
         self.act_rename = QAction(style.standardIcon(QStyle.SP_DialogApplyButton), "Переобозначить…", self)
         self.act_rename.setShortcut("Ctrl+Return")
-        self.act_rename.triggered.connect(self.rename)
+        self.act_rename.triggered.connect(lambda: self.rename())
         self.act_rollback = QAction("Откатить последнее переобозначение…", self)
         self.act_rollback.triggered.connect(self.rollback)
 
@@ -201,6 +201,7 @@ class MainWindow(QMainWindow):
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tree.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         self.tree.doubleClicked.connect(self._tree_double_clicked)
@@ -426,12 +427,42 @@ class MainWindow(QMainWindow):
         if key:
             self.open_in_kompas(key)
 
+    def selected_keys(self):
+        keys = []
+        for index in self.tree.selectionModel().selectedRows(0):
+            k = self._key_at(index)
+            d = self.project.doc(k) if (k and self.project) else None
+            if d is not None and k not in keys:
+                keys.append(k)
+        return keys
+
+    def selected_branches(self):
+        """Выделенные элементы вместе со всем составом выделенных сборок."""
+        out, stack = set(), list(self.selected_keys())
+        while stack:
+            k = stack.pop()
+            if k in out:
+                continue
+            out.add(k)
+            stack.extend(c for c, _ in self.project.components.get(k, []))
+        return out
+
     def _tree_menu(self, pos):
         key = self._key_at(self.tree.indexAt(pos))
         if not key or self.project is None:
             return
         p = self.project
         d = p.doc(key)
+        selected = self.selected_keys()
+        if len(selected) > 1 and key in selected:
+            menu = QMenu(self)
+            editable = [k for k in selected if self.builder.editable(k)]
+            menu.addAction(f"Изменить выделенные ({len(editable)})…", lambda: self.group_edit(editable)).setEnabled(
+                bool(editable) and self.worker is None)
+            act = menu.addAction("Переобозначить выделенные ветки…", lambda: self.rename(self.selected_branches()))
+            act.setEnabled(bool(self.pending) and self.worker is None)
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         menu = QMenu(self)
         exists = os.path.exists(self._path(key))
         act = menu.addAction("Открыть в КОМПАСе", lambda: self.open_in_kompas(key))
@@ -466,6 +497,8 @@ class MainWindow(QMainWindow):
             if parent_key:
                 menu.addAction("Удалить из сборки…", lambda: self.delete_from_assembly(parent_key, key))
             menu.addAction("Версии узла…", lambda: self.node_versions(key))
+            if self.pending and d.kind == "assembly":
+                menu.addAction("Переобозначить только эту ветку…", lambda: self.rename(self.selected_branches() | {key}))
         if d is not None and d.kind == "assembly" and p.inside(key) and self.worker is None:
             if not parent_key and key in p.roots():
                 menu.addAction("Создать уровень выше…", lambda: self.level_up(key))
@@ -654,10 +687,16 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self.builder.refresh_key(key)
 
-    def rename(self):
+    def rename(self, only=None):
+        """only — множество ключей: переобозначить только эти элементы (выделенные ветки)."""
         if not self.pending or self.worker is not None:
             return
-        plan = build_plan(self.project, self.pending)
+        changes = {k: v for k, v in self.pending.items() if only is None or k in only}
+        if not changes:
+            QMessageBox.information(self, APP_NAME, "В выделенных ветках нет изменений обозначений и наименований.")
+            return
+        self._renamed_keys = set(changes)
+        plan = build_plan(self.project, changes)
         if not plan.ops and not plan.issues:
             QMessageBox.information(self, APP_NAME, "Изменений нет.")
             return
@@ -683,7 +722,7 @@ class MainWindow(QMainWindow):
         if result is not None and result.done:
             self.proj_settings.rename_paths(self.project.root, plan.mapping)
             self._save_settings()
-            self.pending = {}
+            self.pending = {k: v for k, v in self.pending.items() if k not in self._renamed_keys}
             text = f"Переобозначение выполнено. Файлов затронуто: {len(plan.ops)}."
             if result.warnings:
                 text += "\n\nЗамечания:\n" + "\n".join(result.warnings[:15])
@@ -823,25 +862,54 @@ class MainWindow(QMainWindow):
         target_path = self._path(target)
         td = self.project.doc(target)
         rel = os.path.relpath(os.path.dirname(target_path), self.project.root)
+        from kompas_manager.core.editing import _next_numbers
+        from kompas_manager.core.library import NUMBERED_KINDS
+        from kompas_manager.core.structure import Node
+
+        project_des = ""
+        if element.passport and element.passport.kind in NUMBERED_KINDS and not element.passport.designation_template:
+            node = Node("part", element.title)
+            project_des = _next_numbers(self.project, target, [node], self.proj_settings).get(id(node), "")
         dlg = InsertDialog(element, self.project.root, table, props, self, initial_folder=rel,
-                           target_title=f"{td.designation} {td.name}")
+                           target_title=f"{td.designation} {td.name}", project_designation=project_des)
         if not dlg.exec():
             return
         plan, count = dlg.plan, dlg.count.value()
         from kompas_manager.core.localize import Placement
 
-        same = Placement(self.project.root).by_name.get(os.path.basename(plan.target).lower())
-        if same:  # один типоразмер — один файл на всё изделие
-            plan.target, plan.reuse = same, True
         root = self.project.root
+        # один типоразмер — один файл на всё изделие: сначала по происхождению, затем по имени файла
+        same = self.proj_settings.find_origin(root, element.path, plan.values)
+        if not same:
+            by_name = Placement(root).by_name.get(os.path.basename(plan.target).lower())
+            if by_name:
+                o = self.proj_settings.origin(root, by_name)
+                from kompas_manager.core.library import values_key
+
+                if o and (norm(o.get("source", "")) != norm(element.path) or o.get("values") != values_key(plan.values)):
+                    QMessageBox.warning(
+                        self, APP_NAME,
+                        f"В изделии уже есть «{os.path.basename(by_name)}», но он сделан из другого элемента или с "
+                        "другими значениями. Уточните шаблон наименования в паспорте элемента, чтобы имена "
+                        "разных типоразмеров не совпадали.")
+                    return
+                same = by_name
+        if same:
+            plan.target, plan.reuse = same, True
         show = self.act_show_kompas.isChecked()
+        known = self._known_externals()
 
         def fn(K, log):
             from kompas_manager.autonomy_ops import insert_library
 
-            return insert_library(K, root, plan, element, target_path, count, show=show, log=log)
+            return insert_library(K, root, plan, element, target_path, count, show=show, log=log, known=known)
 
-        def done(path):
+        def done(result):
+            path, sources = result
+            if not plan.reuse:
+                self.proj_settings.add_origin(root, path, element.path, plan.values)
+                self._save_settings()
+            self._record_origins(sources)
             self.statusBar().showMessage(
                 ("Использован существующий файл " if plan.reuse else "Вставлено: ")
                 + os.path.relpath(path, root) + f" → {td.designation} {td.name}", 10000)
@@ -1055,13 +1123,16 @@ class MainWindow(QMainWindow):
         root = self.project.root
         show = self.act_show_kompas.isChecked()
 
+        known = self._known_externals()
+
         def fn(K, log):
             from kompas_manager.autonomy_ops import paste_node
 
-            return paste_node(K, root, plan, target_path, show=show, log=log)
+            return paste_node(K, root, plan, target_path, show=show, log=log, known=known)
 
         def done(result):
-            new_root, _created, missing = result
+            new_root, _created, missing, sources = result
+            self._record_origins(sources)
             if missing:
                 self.log.appendPlainText("Не найдены внешние файлы: " + "; ".join(missing))
             if do_renum:
@@ -1090,6 +1161,23 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, APP_NAME, f"Узел вставлен. Новые обозначения ({len(numbers)}) показаны синим — "
                                 "проверьте и нажмите «Переобозначить».")
 
+    def _known_externals(self):
+        """Внешние файлы, копии которых в изделии уже есть (без изменённых значений)."""
+        root = self.project.root
+        out = {}
+        for rel, o in self.proj_settings.origins.items():
+            if not o.get("values"):
+                out[norm(o.get("source", ""))] = os.path.join(root, rel)
+        return out
+
+    def _record_origins(self, sources):
+        if not sources:
+            return
+        root = self.project.root
+        for copy, src in sources.items():
+            self.proj_settings.add_origin(root, copy, src, {})
+        self._save_settings()
+
     def make_autonomous(self):
         if self.project is None:
             return
@@ -1109,13 +1197,16 @@ class MainWindow(QMainWindow):
         docs = [self._path(k) for k in {k for v in ext.values() for k in v[1]}]
         show = self.act_show_kompas.isChecked()
 
+        known = self._known_externals()
+
         def fn(K, log):
             from kompas_manager.autonomy_ops import localize
 
-            return localize(K, root, docs, show=show, log=log)
+            return localize(K, root, docs, show=show, log=log, known=known)
 
         def done(result):
-            created, missing = result
+            created, missing, sources = result
+            self._record_origins(sources)
             msg = f"Скопировано в изделие файлов: {len(created)}."
             if missing:
                 msg += "\n\nНе найдены (ссылки остались битыми):\n" + "\n".join(missing[:15])
@@ -1168,6 +1259,27 @@ class MainWindow(QMainWindow):
             return level_up(K, folder, des, name, head, show=show, log=log)
 
         self._run_call(fn, lambda _p: self.scan(force=False), "Создание уровня выше")
+
+    def group_edit(self, keys):
+        from kompas_manager.ui.dialogs import GroupEditDialog
+
+        values = {}
+        for k in keys:
+            d = self.project.doc(k)
+            values[k] = self.pending.get(k, (d.designation, d.name))
+        dlg = GroupEditDialog(values, self)
+        if not dlg.exec():
+            return
+        changed = 0
+        for k, (des, name) in dlg.result_values().items():
+            d = self.project.doc(k)
+            if (des, name) == (d.designation, d.name):
+                self.pending.pop(k, None)
+            else:
+                self.pending[k] = (des, name)
+                changed += 1
+        self._rebuild_tree()
+        self.statusBar().showMessage(f"Изменено элементов: {changed}. Проверьте и нажмите «Переобозначить».", 8000)
 
     def _new_product_here(self):
         folder = self.workspace.current_folder()

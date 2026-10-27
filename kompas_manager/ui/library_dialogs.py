@@ -84,8 +84,15 @@ class PassportDialog(QDialog):
         self.preview = QLabel()
         self.preview.setWordWrap(True)
 
+        self.kind_hint = QLabel()
+        self.kind_hint.setWordWrap(True)
+        self.kind_hint.setStyleSheet("color: #06c;")
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self._kind_changed()
+
         form = QFormLayout()
         form.addRow("Тип элемента:", self.kind)
+        form.addRow("", self.kind_hint)
         form.addRow("Шаблон обозначения:", self.des_tpl)
         form.addRow("Шаблон наименования:", self.name_tpl)
         form.addRow("Таблица типоразмеров:", trow)
@@ -110,6 +117,21 @@ class PassportDialog(QDialog):
         layout.addWidget(self.preview)
         layout.addWidget(buttons)
         self._update_preview()
+
+    KIND_HINTS = {
+        "standard": "Копия в изделии — без обозначения (если шаблон обозначения пуст), файл называется по "
+                    "наименованию. Включите в шаблон наименования все размеры, которыми различаются типоразмеры, "
+                    "и стандарт: «Фланец 1-{Dn}-{Pn} ГОСТ 33259».",
+        "purchased": "Копия — без обозначения, файл по наименованию. В наименование включите марку или артикул "
+                     "и параметры исполнения: «Кран шаровой {Dn} PN{Pn}».",
+        "like_standard": "Обозначение копии — по схеме изделия: следующий свободный номер в сборке, куда вставляется "
+                         "(оставьте шаблон обозначения пустым). Наименование — по шаблону: «Патрубок {D}x{s}».",
+        "part": "Обозначение копии — по схеме изделия: следующий свободный номер в сборке. "
+                "Шаблон обозначения оставьте пустым.",
+    }
+
+    def _kind_changed(self, *_):
+        self.kind_hint.setText(self.KIND_HINTS.get(self.kind.currentData(), ""))
 
     def eventFilter(self, obj, event):
         if event.type() == event.Type.FocusIn and obj in (self.des_tpl, self.name_tpl):
@@ -162,13 +184,14 @@ class InsertDialog(QDialog):
     """Значения переменных (вручную или строкой таблицы), папка проекта, предпросмотр."""
 
     def __init__(self, element, project_root, table=None, model_props=("", ""), parent=None,
-                 initial_folder=".", target_title=""):
+                 initial_folder=".", target_title="", project_designation=""):
         super().__init__(parent)
         self.setWindowTitle(f"Вставка в проект — {element.title}")
         self.resize(980, 640)
         self.element = element
         self.project_root = project_root
         self.model_props = model_props
+        self.project_designation = project_designation
         self.plan = None
         p = element.passport or Passport()
         self.vars = p.editable_variables()
@@ -307,7 +330,8 @@ class InsertDialog(QDialog):
         return os.path.normpath(os.path.join(self.project_root, rel))
 
     def _update(self, *_):
-        self.plan = plan_insert(self.element, self.entered_values(), self.target_dir(), *self.model_props)
+        self.plan = plan_insert(self.element, self.entered_values(), self.target_dir(), *self.model_props,
+                                project_designation=self.project_designation)
         p = self.plan
         lines = [
             f"Обозначение: <b>{html.escape(p.designation or '—')}</b> &nbsp; Наименование: <b>{html.escape(p.name or '—')}</b>",

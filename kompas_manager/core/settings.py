@@ -19,6 +19,7 @@ class ProjectSettings:
     code: str = "АБВГ"
     pins: dict = field(default_factory=dict)  # отн. путь -> {"сборка": N} или {"деталь": N}
     excluded: list = field(default_factory=list)  # отн. пути моделей, не получающих обозначение
+    origins: dict = field(default_factory=dict)  # отн. путь копии -> {"source": путь, "values": {имя: значение}}
 
     # ---------- файл ----------
 
@@ -37,6 +38,7 @@ class ProjectSettings:
         s.code = data.get("code", s.code)
         s.pins = {k: dict(v) for k, v in (data.get("pins") or {}).items()}
         s.excluded = list(data.get("excluded") or [])
+        s.origins = {k: dict(v) for k, v in (data.get("origins") or {}).items()}
         return s
 
     def save(self, root):
@@ -45,6 +47,7 @@ class ProjectSettings:
             "code": self.code,
             "pins": self.pins,
             "excluded": sorted(self.excluded),
+            "origins": self.origins,
         }
         with open(os.path.join(root, FILE_NAME), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -90,3 +93,26 @@ class ProjectSettings:
 
         self.pins = {moved(rel): v for rel, v in self.pins.items()}
         self.excluded = [moved(rel) for rel in self.excluded]
+        self.origins = {moved(rel): v for rel, v in self.origins.items()}
+
+    # ---------- происхождение копий (библиотека, внешние файлы) ----------
+
+    def add_origin(self, root, path, source, values=None):
+        from .library import values_key
+
+        self.origins[self.rel(root, path)] = {"source": os.path.normpath(source), "values": values_key(values or {})}
+
+    def origin(self, root, path):
+        return self.origins.get(self.rel(root, path))
+
+    def find_origin(self, root, source, values=None):
+        """Файл изделия, сделанный из source с теми же значениями, или None."""
+        from .library import values_key
+
+        want = values_key(values or {})
+        for rel, o in self.origins.items():
+            if norm(o.get("source", "")) == norm(source) and o.get("values", {}) == want:
+                path = os.path.join(root, rel)
+                if os.path.exists(path):
+                    return path
+        return None

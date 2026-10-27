@@ -98,3 +98,14 @@ def test_bulk_replace():
     assert bulk_replace(values, "name", "втулка", "Гильза") == {"a": ("ЭСК.1", "Гильза опорная")}
     assert bulk_replace(values, "name", "втулка", "Гильза", case_sensitive=True) == {}
     assert bulk_replace(values, "designation", "ЭСК", "АБВГ") == {"a": ("АБВГ.1", "Втулка опорная"), "b": ("АБВГ.2", "Ось")}
+
+
+def test_group_edit():
+    from kompas_manager.core.bulk import group_edit
+
+    v = {"a": ("Г.001.01", "Патрубок"), "b": ("Г.001.02", "Патрубок входа")}
+    assert group_edit(v, "suffix", " Ду50")["a"] == ("Г.001.01", "Патрубок Ду50")
+    assert group_edit(v, "prefix", "Узел. ")["b"] == ("Г.001.02", "Узел. Патрубок входа")
+    assert group_edit(v, "set", "Штуцер")["b"][1] == "Штуцер"
+    assert group_edit(v, "replace", "Штуцер", name_find="патрубок")["b"][1] == "Штуцер входа"
+    assert group_edit(v, des_find="Г.001", des_repl="Г.002")["a"][0] == "Г.002.01"

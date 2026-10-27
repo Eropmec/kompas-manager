@@ -11,7 +11,11 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 
+import re
+
 from .naming import file_name, format_number, format_template
+
+_BAD_NAME = re.compile(r'[<>:"/\\|?*]')
 
 PASSPORT_SUFFIX = ".kmlib.json"
 MODEL_EXTS = (".m3d", ".a3d")
@@ -207,7 +211,28 @@ def resolve_names(element, values, current_designation="", current_name=""):
     return des.strip(), name.strip(), problems
 
 
-def plan_insert(element, values, target_dir, current_designation="", current_name=""):
+NUMBERED_KINDS = ("like_standard", "part")  # получают обозначение по схеме изделия
+
+
+def copy_file_name(designation, name, ext, title, values):
+    """Имя файла копии: «Обозначение - Наименование»; без обозначения — по наименованию
+    (стандартные и покупные изделия); без того и другого — по элементу и значениям."""
+    if designation and name:
+        return file_name(designation, name, ext)
+    if name:
+        return _BAD_NAME.sub("_", name.strip()) + ext
+    suffix = " ".join(f"{k}{format_number(v)}" for k, v in values.items())
+    return f"{title} {suffix}".strip() + ext
+
+
+def values_key(values):
+    """Ключ типоразмера для сравнения: значения в каноническом виде."""
+    return {k: format_number(v) for k, v in sorted(values.items())}
+
+
+def plan_insert(element, values, target_dir, current_designation="", current_name="", project_designation=""):
+    """project_designation — обозначение по схеме изделия для деталей (тип «по типу стандартной», «деталь»),
+    если в паспорте нет шаблона обозначения."""
     p = element.passport or Passport()
     known = {v.name for v in p.editable_variables()}
     clean = {}
@@ -224,14 +249,12 @@ def plan_insert(element, values, target_dir, current_designation="", current_nam
             clean[n] = str(v)  # выражение КОМПАСа
     des, name, more = resolve_names(element, clean, current_designation, current_name)
     problems += more
+    if p.kind in NUMBERED_KINDS and not p.designation_template and project_designation:
+        des = project_designation
     ext = os.path.splitext(element.path)[1]
-    if des and name:
-        target = os.path.join(target_dir, file_name(des, name, ext))
-    else:
-        suffix = " ".join(f"{k}{format_number(v)}" for k, v in clean.items())
-        target = os.path.join(target_dir, f"{element.title} {suffix}".strip() + ext)
-        if not name:
-            problems.append("Не задано наименование — файл назван по модели и значениям")
+    target = os.path.join(target_dir, copy_file_name(des, name, ext, element.title, clean))
+    if not name:
+        problems.append("Не задано наименование — файл назван по модели и значениям")
     plan = InsertPlan(element.path, target, clean, des, name, problems=problems)
     plan.reuse = os.path.exists(target)
     if os.path.normcase(os.path.abspath(target)) == os.path.normcase(os.path.abspath(element.path)):

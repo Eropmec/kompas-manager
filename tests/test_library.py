@@ -97,3 +97,35 @@ def test_plan_extract(tmp_path):
     # без паспорта: имя по исходному файлу и изменённым значениям
     groups = plan_extract(comps[:1], {src: {"D": 1000.0, "s": 10.0, "ISP": 2.0}}, {src: ("X", "Днище")}, str(tmp_path))
     assert os.path.basename(groups[0].target) == "Днище [D800 s8].m3d"
+
+
+def test_copy_naming_by_kind(tmp_path):
+    from kompas_manager.core.library import copy_file_name
+
+    assert copy_file_name("А.1", "Втулка", ".m3d", "x", {}) == "А.1 - Втулка.m3d"
+    assert copy_file_name("", "Фланец 1-50-16 ГОСТ 33259", ".m3d", "x", {}) == "Фланец 1-50-16 ГОСТ 33259.m3d"
+    assert copy_file_name("", "", ".m3d", "Фланец", {"Dn": 50.0}) == "Фланец Dn50.m3d"
+    flange = Element(str(tmp_path / "Lib" / "Фланец.m3d"), Passport(
+        kind="standard", name_template="Фланец 1-{Dn}-{Pn} ГОСТ 33259",
+        variables=[Variable("Dn", 50.0), Variable("Pn", 16.0)]))
+    plan = plan_insert(flange, {"Dn": "80"}, str(tmp_path), project_designation="Г.001.05")
+    assert os.path.basename(plan.target) == "Фланец 1-80-16 ГОСТ 33259.m3d" and plan.designation == ""
+    nozzle = Element(str(tmp_path / "Lib" / "Патрубок.m3d"), Passport(
+        kind="like_standard", name_template="Патрубок {D}x{s}", variables=[Variable("D", 57.0), Variable("s", 4.0)]))
+    plan = plan_insert(nozzle, {}, str(tmp_path), project_designation="Г.001.05")
+    assert os.path.basename(plan.target) == "Г.001.05 - Патрубок 57x4.m3d"
+
+
+def test_origins(tmp_path):
+    from kompas_manager.core.settings import ProjectSettings
+
+    root = str(tmp_path)
+    copy = tmp_path / "Узел" / "Фланец 1-80-16.m3d"
+    copy.parent.mkdir()
+    copy.write_text("x")
+    s = ProjectSettings()
+    s.add_origin(root, str(copy), "D:/Lib/Фланец.m3d", {"Dn": 80.0})
+    s.save(root)
+    s2 = ProjectSettings.load(root)
+    assert s2.find_origin(root, "D:/Lib/Фланец.m3d", {"Dn": "80"}) == str(copy)
+    assert s2.find_origin(root, "D:/Lib/Фланец.m3d", {"Dn": "100"}) is None

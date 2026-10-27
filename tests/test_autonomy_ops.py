@@ -42,7 +42,7 @@ def test_localize_chain(tmp_path, monkeypatch):
     sub = str(root / "Узел" / "У.a3d")
     put(sub, "У", "У", [lib_part])
     put(head, "А", "А", [sub, lib_asm, lib_part])
-    created, missing = autonomy_ops.localize(fake(), str(root), [head, sub], log=lambda *_: None)
+    created, missing, _src = autonomy_ops.localize(fake(), str(root), [head, sub], log=lambda *_: None)
     names = sorted(os.path.relpath(p, root) for p in created)
     # фланец — один файл на изделие (в папке первого ссылающегося), состав библиотечной сборки — рядом с ней
     assert names == sorted(["Соединение.a3d", "Прокладка.m3d", os.path.join("Узел", "Фланец.m3d")]) or \
@@ -72,7 +72,7 @@ def test_paste_and_level_up(tmp_path, monkeypatch):
     head = str(dst / "Г.000.00 - Аппарат.a3d")
     put(head, "Г.000.00", "Аппарат", [])
     plan = plan_paste(sp, norm(s_asm), str(dst))
-    new_root, created, missing = autonomy_ops.paste_node(fake(), str(dst), plan, head, log=lambda *_: None)
+    new_root, created, missing, _src = autonomy_ops.paste_node(fake(), str(dst), plan, head, log=lambda *_: None)
     assert FILES[norm(head)]["refs"] == [new_root]
     refs = FILES[norm(new_root)]["refs"]
     assert all(r.startswith(str(dst)) for r in refs)  # и деталь, и днище — уже внутри изделия

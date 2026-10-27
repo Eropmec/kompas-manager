@@ -18,3 +18,22 @@ def bulk_replace(values, field, find, repl, case_sensitive=False):
         if new != pair[idx]:
             out[key] = (new, pair[1]) if idx == 0 else (pair[0], new)
     return out
+
+
+def group_edit(values, name_mode="keep", name_text="", name_find="", des_find="", des_repl="", case_sensitive=False):
+    """Групповая правка выделенных элементов. values: {ключ: (обозначение, наименование)}.
+    name_mode: keep | set | prefix | suffix | replace. Возвращает новые значения всех элементов."""
+    out = {}
+    for key, (des, name) in values.items():
+        if name_mode == "set":
+            name = name_text
+        elif name_mode == "prefix":
+            name = name_text + name
+        elif name_mode == "suffix":
+            name = name + name_text
+        elif name_mode == "replace" and name_find:
+            name = replace_text(name, name_find, name_text, case_sensitive)
+        if des_find:
+            des = replace_text(des, des_find, des_repl, case_sensitive)
+        out[key] = (des.strip(), name.strip())
+    return out
