@@ -436,3 +436,39 @@ class SettingsDialog(QDialog):
                 return
             self.q.setValue(key, path)
         self.accept()
+
+
+class LevelUpDialog(QDialog):
+    """Обозначение и наименование новой головной сборки над изделием."""
+
+    def __init__(self, head_doc, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Создать уровень выше")
+        self.resize(520, 200)
+        self.des = QLineEdit()
+        self.name = QLineEdit()
+        self.des.setPlaceholderText("например, " + settings.scheme.format(settings.code, 100, 0)
+                                    if not settings.scheme.validate() else "")
+        form = QFormLayout()
+        form.addRow("Обозначение новой сборки:", self.des)
+        form.addRow("Наименование:", self.name)
+        note = QLabel(f"Будет создана новая головная сборка, в неё вставляется «{head_doc.designation} "
+                      f"{head_doc.name}» без изменений. Файл — в папке изделия.")
+        note.setWordWrap(True)
+        buttons = russian_buttons(QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel))
+        buttons.button(QDialogButtonBox.Ok).setText("Создать")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def _accept(self):
+        if not self.des.text().strip() or not self.name.text().strip():
+            QMessageBox.warning(self, self.windowTitle(), "Заполните обозначение и наименование.")
+            return
+        self.accept()
+
+    def values(self):
+        return self.des.text().strip(), self.name.text().strip()

@@ -59,6 +59,8 @@ jobs:
           --hidden-import kompas_manager.ui.structure_dialog
           --hidden-import kompas_manager.editing_ops
           --hidden-import kompas_manager.ui.versions_dialog
+          --hidden-import kompas_manager.autonomy_ops
+          --hidden-import kompas_manager.ui.source_panel
           --hidden-import openpyxl
           run_manager.py
 

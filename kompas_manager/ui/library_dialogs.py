@@ -161,7 +161,8 @@ class PassportDialog(QDialog):
 class InsertDialog(QDialog):
     """Значения переменных (вручную или строкой таблицы), папка проекта, предпросмотр."""
 
-    def __init__(self, element, project_root, table=None, model_props=("", ""), parent=None):
+    def __init__(self, element, project_root, table=None, model_props=("", ""), parent=None,
+                 initial_folder=".", target_title=""):
         super().__init__(parent)
         self.setWindowTitle(f"Вставка в проект — {element.title}")
         self.resize(980, 640)
@@ -179,6 +180,7 @@ class InsertDialog(QDialog):
             dirs[:] = sorted(d for d in dirs if not d.startswith(("_", ".")))
             if dirpath != project_root:
                 self.folder.addItem(os.path.relpath(dirpath, project_root))
+        self.folder.setCurrentText(initial_folder)
         self.folder.currentTextChanged.connect(self._update)
         browse = QPushButton("Обзор…")
         browse.clicked.connect(self._pick_folder)
@@ -245,7 +247,15 @@ class InsertDialog(QDialog):
             middle = values_box
 
         form = QFormLayout()
+        if target_title:
+            form.addRow("Вставить в сборку:", QLabel(f"<b>{html.escape(target_title)}</b>"))
         form.addRow("Папка в проекте:", frow)
+        from PySide6.QtWidgets import QSpinBox
+
+        self.count = QSpinBox()
+        self.count.setRange(1, 999)
+        if target_title:
+            form.addRow("Количество:", self.count)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         russian_buttons(buttons)

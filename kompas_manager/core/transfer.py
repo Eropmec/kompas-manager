@@ -79,3 +79,13 @@ def folder_relink_map(old_root, new_root, refs):
             if os.path.exists(target):
                 out[n] = target
     return out
+
+
+def plan_paste(project, key, target_dir):
+    """Вставка узла из другого изделия: раскладка узла сохраняется; если имена файлов заняты —
+    узел кладётся в подпапку с именем его головного файла."""
+    plan = plan_transfer(project, key, target_dir)
+    if any("уже существует" in p for p in plan.problems):
+        stem = os.path.splitext(os.path.basename(project.raw_paths.get(key, key)))[0]
+        plan = plan_transfer(project, key, os.path.join(target_dir, stem))
+    return plan

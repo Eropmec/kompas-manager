@@ -148,3 +148,31 @@ def _next_numbers(project, assembly_key, new_children, settings):
     for n in new_children:
         number(n, parsed[0])
     return out
+
+
+def renumber_subtree(project, parent_key, node_key, settings):
+    """Новые обозначения для узла, вставленного в сборку parent_key: следующие свободные номера
+    по схеме изделия. Возвращает {ключ модели: обозначение} (пусто, если схема не подходит)."""
+    from .structure import Node
+
+    made = {}
+
+    def build(key):
+        d = project.doc(key)
+        n = Node(d.kind, d.name)
+        n._key = key
+        made[key] = n
+        for child, count in project.components.get(key, []):
+            cd = project.doc(child)
+            if cd is None or child in made or not project.inside(child):
+                continue
+            c = build(child)
+            c.count = count
+            n.children.append(c)
+        return n
+
+    root = build(node_key)
+    # номера, занятые самим вставленным узлом, не должны мешать: исключаем его модели из учёта
+    others = Project(project.root, [d for k, d in project.docs.items() if k not in made])
+    numbers = _next_numbers(others, parent_key, [root], settings)
+    return {n._key: numbers[id(n)] for n in root.walk() if id(n) in numbers}

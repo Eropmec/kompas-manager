@@ -159,8 +159,9 @@ class WorkspacePanel(QWidget):
     new_product_requested = Signal(str)  # родительская папка
     folder_copied = Signal(str, str)  # откуда, куда
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, browse_only=False):
         super().__init__(parent)
+        self.browse_only = browse_only  # окно-источник: только просмотр и открытие
         self.q = QSettings("KompasManager", "KompasManager")
         self.clipboard = None
         self.sections = load_sections(self.q)
@@ -182,7 +183,9 @@ class WorkspacePanel(QWidget):
         self.tree.itemClicked.connect(self._clicked)
         self.tree.itemDoubleClicked.connect(lambda it, _c: self._open(it))
 
-        hint = QLabel("Раздел → заказчик → проект → изделие. Папка с файлами КОМПАСа открывается щелчком.")
+        hint = QLabel("Раздел → заказчик → проект → изделие. " + (
+            "Щелчок по изделию показывает его состав ниже." if browse_only else
+            "Папка с файлами КОМПАСа открывается щелчком."))
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray;")
         layout = QVBoxLayout(self)
@@ -330,6 +333,13 @@ class WorkspacePanel(QWidget):
             return
         section = bool(item.data(0, SECTION_ROLE))
         menu = QMenu(self)
+        if self.browse_only:
+            if not section:
+                menu.addAction("Показать состав", lambda: self.open_requested.emit(path))
+            menu.addAction("Обновить", lambda: self._refresh_item(item))
+            menu.addAction("Показать в проводнике", lambda: self._explorer(path))
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if not section:
             menu.addAction("Открыть как изделие", lambda: self.open_requested.emit(path))
             menu.addSeparator()
