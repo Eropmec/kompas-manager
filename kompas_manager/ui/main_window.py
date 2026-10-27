@@ -1167,7 +1167,7 @@ class MainWindow(QMainWindow):
         out = {}
         for rel, o in self.proj_settings.origins.items():
             if not o.get("values"):
-                out[norm(o.get("source", ""))] = os.path.join(root, rel)
+                out[norm(o.get("source", ""))] = os.path.normpath(os.path.join(root, rel))
         return out
 
     def _record_origins(self, sources):

@@ -112,7 +112,7 @@ class ProjectSettings:
         want = values_key(values or {})
         for rel, o in self.origins.items():
             if norm(o.get("source", "")) == norm(source) and o.get("values", {}) == want:
-                path = os.path.join(root, rel)
+                path = os.path.normpath(os.path.join(root, rel))
                 if os.path.exists(path):
                     return path
         return None
