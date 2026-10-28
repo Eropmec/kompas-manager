@@ -77,12 +77,6 @@ jobs:
           --hidden-import copy_test
           proto/app.py
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: exe
-          path: |
-            dist/KompasManager.exe
-            dist/KompasProto.exe
 
       - name: Публикация в Releases
         uses: softprops/action-gh-release@v2
