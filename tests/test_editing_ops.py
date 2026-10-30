@@ -82,3 +82,64 @@ def test_restore_version(tmp_path):
     assert not os.path.exists(new_asm)  # убран в _old
     assert FILES[k(root, "Г.000.00 - Аппарат.a3d")]["refs"][0] == os.path.join(root, "Г.001.00 - Узел.a3d")
     assert len(os.listdir(os.path.join(root, "_versions"))) == 2  # старая + автосохранение
+
+
+def test_delete_falls_back_to_api5(tmp_path):
+    root = str(tmp_path)
+    p = setup(root)
+    api = K()
+
+    def fail7(c, log=print):
+        raise RuntimeError("API7 не умеет")
+
+    def del5(d, path, log=print):
+        before = len(d.data["refs"])
+        d.data["refs"] = [r for r in d.data["refs"] if norm(r) != norm(path)]
+        return before - len(d.data["refs"])
+
+    api.delete_component, api.delete_components5 = fail7, del5
+    head = k(root, "Г.000.00 - Аппарат.a3d")
+    plan = plan_delete(p, head, k(root, "Г.000.01 - Корпус.m3d"), with_files=False)
+    assert editing_ops.delete_from_assembly(api, root, plan, log=lambda *_: None) == 1
+    assert [os.path.basename(r) for r in FILES[head]["refs"]] == ["Г.001.00 - Узел.a3d"]
+
+
+def test_delete_nothing_saved_when_kompas_refuses(tmp_path):
+    import pytest
+
+    root = str(tmp_path)
+    p = setup(root)
+    api = K()
+    saved = []
+
+    def fail(*a, **kw):
+        raise RuntimeError("нет")
+
+    api.delete_component = fail
+    api.delete_components5 = fail
+    head = k(root, "Г.000.00 - Аппарат.a3d")
+    real_open = api.open_doc
+
+    def open_doc(app, path, visible=False, readonly=True):
+        d = real_open(app, path, visible, readonly)
+        d.Save = lambda: saved.append(path)
+        return d
+
+    api.open_doc = open_doc
+    plan = plan_delete(p, head, k(root, "Г.001.00 - Узел.a3d"))
+    with pytest.raises(RuntimeError):
+        editing_ops.delete_from_assembly(api, root, plan, log=lambda *_: None)
+    assert saved == []
+    assert os.path.exists(os.path.join(root, "Г.001.00 - Узел.a3d"))  # файлы не тронуты
+
+
+def test_delete_several(tmp_path):
+    root = str(tmp_path)
+    p = setup(root)
+    head = k(root, "Г.000.00 - Аппарат.a3d")
+    plans = [plan_delete(p, head, k(root, "Г.000.01 - Корпус.m3d")),
+             plan_delete(p, k(root, "Г.001.00 - Узел.a3d"), k(root, "Г.001.01 - Патрубок.m3d"))]
+    editing_ops.delete_from_assemblies(K(), root, plans, log=lambda *_: None)
+    assert [os.path.basename(r) for r in FILES[head]["refs"]] == ["Г.001.00 - Узел.a3d"]
+    assert FILES[k(root, "Г.001.00 - Узел.a3d")]["refs"] == []
+    assert not os.path.exists(os.path.join(root, "Г.000.01 - Корпус.m3d"))

@@ -112,6 +112,11 @@ class MainWindow(QMainWindow):
         self.act_rename = QAction(style.standardIcon(QStyle.SP_DialogApplyButton), "Переобозначить…", self)
         self.act_rename.setShortcut("Ctrl+Return")
         self.act_rename.triggered.connect(lambda: self.rename())
+        self.act_undo = QAction("Отменить", self)
+        self.act_undo.setShortcut(QKeySequence.Undo)
+        self.act_undo.triggered.connect(self.undo)
+        self.act_undo.setEnabled(False)
+        self.undo_stack = []
         self.act_rollback = QAction("Откатить последнее переобозначение…", self)
         self.act_rollback.triggered.connect(self.rollback)
 
@@ -133,6 +138,14 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         m_file.addAction(self.act_exit)
         self._fill_recent_menu()
+
+        m_edit = menu.addMenu("Правка")
+        m_edit.addAction(self.act_undo)
+        m_edit.addSeparator()
+        m_edit.addAction("Копировать узел\tCtrl+C", self.copy_selected)
+        m_edit.addAction("Вставить в выделенную сборку\tCtrl+V",
+                         lambda: self.paste_ref(self.node_clip, self.tree.currentIndex()))
+        m_edit.addAction("Удалить из сборки…\tDel", self.delete_selected)
 
         m_project = menu.addMenu("Проект")
         m_project.addAction(self.act_refresh)
@@ -168,6 +181,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_new_product)
         toolbar.addAction(self.act_open)
         toolbar.addAction(self.act_refresh)
+        toolbar.addAction(self.act_undo)
         toolbar.addSeparator()
         toolbar.addAction(self.act_expand)
         toolbar.addAction(self.act_collapse)
@@ -258,6 +272,7 @@ class MainWindow(QMainWindow):
                              (self.source.browser.tree, self.source.browser.copy_current),
                              (self.workspace.tree, self.workspace.copy_current)):
             QShortcut(QKeySequence.Copy, widget, copy, context=Qt.WidgetShortcut)
+        QShortcut(QKeySequence.Delete, self.tree, self.delete_selected, context=Qt.WidgetShortcut)
         QShortcut(QKeySequence.Paste, self.tree, lambda: self.paste_ref(self.node_clip, self.tree.currentIndex()),
                   context=Qt.WidgetShortcut)
         self.tree.selectionModel().currentChanged.connect(lambda *_: self._update_target_label())
@@ -350,6 +365,7 @@ class MainWindow(QMainWindow):
         self._update_counts()
         self._update_title()
         self._apply_filter(self.filter_edit.text())
+        self._update_undo_action()
 
     def _rebuild_tree(self, expand_default=False):
         expanded = None if expand_default else self._expanded_keys()
@@ -473,6 +489,9 @@ class MainWindow(QMainWindow):
             editable = [k for k in selected if self.builder.editable(k)]
             menu.addAction(f"Изменить выделенные ({len(editable)})…", lambda: self.group_edit(editable)).setEnabled(
                 bool(editable) and self.worker is None)
+            pairs = self._delete_pairs()
+            menu.addAction(f"Удалить из сборок ({len(pairs)})…\tDel", lambda: self.delete_items(pairs)).setEnabled(
+                bool(pairs) and self.worker is None)
             act = menu.addAction("Переобозначить выделенные ветки…", lambda: self.rename(self.selected_branches()))
             act.setEnabled(bool(self.pending) and self.worker is None)
             menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -515,7 +534,7 @@ class MainWindow(QMainWindow):
                 menu.addAction("Добавить детали и сборки…", lambda: self.append_items(key))
             parent_key = self._parent_key_at(self.tree.indexAt(pos))
             if parent_key:
-                menu.addAction("Удалить из сборки…", lambda: self.delete_from_assembly(parent_key, key))
+                menu.addAction("Удалить из сборки…\tDel", lambda: self.delete_from_assembly(parent_key, key))
             menu.addAction("Версии узла…", lambda: self.node_versions(key))
             if self.pending and d.kind == "assembly":
                 menu.addAction("Переобозначить только эту ветку…", lambda: self.rename(self.selected_branches() | {key}))
@@ -727,6 +746,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText("\n=== Переобозначение")
         self.tabs.setCurrentWidget(self.log)
         self._plan = plan
+        self._rename_snapshot = self._undo_snapshot()
         self.worker = RenameWorker(plan, show=self.act_show_kompas.isChecked())
         self._set_busy(True)
         self.worker.log.connect(self.log.appendPlainText)
@@ -739,6 +759,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._set_busy(False)
         plan = self._plan
+        self._undo_push(self._rename_snapshot, "Переобозначение")
         if result is not None and result.done:
             self.proj_settings.rename_paths(self.project.root, plan.mapping)
             self._save_settings()
@@ -756,6 +777,71 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, text)
         for w in (result.warnings if result else []):
             self.log.appendPlainText("  замечание: " + w)
+        self.scan(force=False)
+
+    # ---------- отмена (Ctrl+Z) ----------
+
+    def _undo_snapshot(self):
+        return (self.project.root, Backup.names(self.project.root)) if self.project is not None else None
+
+    def _undo_push(self, snapshot, title):
+        """Запомнить резервные копии, сделанные операцией, — их откат и есть отмена операции."""
+        if not snapshot:
+            return
+        root, before = snapshot
+        new = sorted(Backup.names(root) - before)
+        if new:
+            self.undo_stack.append({"root": root, "title": title, "backups": new})
+            del self.undo_stack[:-20]
+            self._update_undo_action()
+
+    def _update_undo_action(self):
+        top = self._undo_top()
+        self.act_undo.setText(f"Отменить: {top['title']}" if top else "Отменить")
+        self.act_undo.setEnabled(top is not None and self.worker is None)
+
+    def _undo_top(self):
+        if self.project is None:
+            return None
+        for item in reversed(self.undo_stack):
+            if os.path.normcase(item["root"]) == os.path.normcase(self.project.root):
+                return item
+        return None
+
+    def undo(self):
+        if self.project is None or self.worker is not None:
+            return
+        top = self._undo_top()
+        if top is None:
+            QMessageBox.information(self, APP_NAME, "В этом сеансе в изделии нечего отменять.\n\nБолее ранние изменения "
+                                    "можно вернуть через «Обозначения → Откатить последнее переобозначение».")
+            return
+        backups = [b for b in (Backup.load(top["root"], n) for n in reversed(top["backups"])) if b is not None]
+        backups = [b for b in backups if not b.manifest.get("rolled_back")]
+        n_files = len({r for b in backups for r in b.manifest["originals"]})
+        answer = QMessageBox.question(
+            self, APP_NAME, f"Отменить «{top['title']}»?\n\nВосстанавливается файлов: {n_files}. "
+            "Файлы должны быть закрыты в КОМПАСе.")
+        if answer != QMessageBox.Yes:
+            return
+        if self.pending and not self._confirm_discard():
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        errors = []
+        try:
+            self.log.appendPlainText(f"\n=== Отмена: {top['title']}")
+            for b in backups:
+                errors += b.rollback(log=self.log.appendPlainText)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.undo_stack.remove(top)
+        self._update_undo_action()
+        if errors:
+            QMessageBox.warning(self, APP_NAME, "Отмена выполнена не полностью:\n" + "\n".join(errors[:15]))
+        else:
+            self.statusBar().showMessage(f"Отменено: {top['title']}", 6000)
+        self.pending = {}
+        self.proj_settings = ProjectSettings.load(self.project.root)
         self.scan(force=False)
 
     def rollback(self):
@@ -797,6 +883,7 @@ class MainWindow(QMainWindow):
         from kompas_manager.ui.workers import CallWorker
 
         self.log.appendPlainText(f"\n=== {title}")
+        snapshot = self._undo_snapshot()
         self.worker = CallWorker(fn)
         self._set_busy(True)
         self.statusBar().showMessage(title + "…")
@@ -807,6 +894,7 @@ class MainWindow(QMainWindow):
             self.worker = None
             self._set_busy(False)
             self.statusBar().clearMessage()
+            self._undo_push(snapshot, title)
             if error:
                 QMessageBox.warning(self, APP_NAME, f"{title}: ошибка.\n{error}\n\nПодробности — на вкладке «Журнал» проекта.")
                 return
@@ -1010,42 +1098,97 @@ class MainWindow(QMainWindow):
         self._run_call(fn, lambda _r: self.scan(force=False), "Добавление в сборку")
 
     def delete_from_assembly(self, parent_key, key):
+        self.delete_items([(parent_key, key)])
+
+    def _delete_pairs(self):
+        """(сборка-родитель, элемент) для выделенных строк дерева, которые можно удалить."""
+        pairs = []
+        for index in self.tree.selectionModel().selectedRows(0):
+            key, parent = self._key_at(index), self._parent_key_at(index)
+            d = self.project.doc(key) if key else None
+            if d is not None and parent and d.kind in ("part", "assembly") and (parent, key) not in pairs:
+                pairs.append((parent, key))
+        return pairs
+
+    def delete_selected(self):
+        if self.project is None or self.worker is not None:
+            return
+        pairs = self._delete_pairs()
+        if not pairs:
+            self.statusBar().showMessage("Удалить можно сборку или деталь внутри сборки (головную сборку — нельзя).", 6000)
+            return
+        self.delete_items(pairs)
+
+    def delete_items(self, pairs):
         from kompas_manager.core.editing import plan_delete
 
         p = self.project
-        d, pd = p.doc(key), p.doc(parent_key)
-        plan = plan_delete(p, parent_key, key)
+        # вложенное в другое удаляемое — удалится вместе с ним
+        chosen = {k for _par, k in pairs}
+
+        def under_chosen(parent):
+            stack, seen = [parent], set()
+            while stack:
+                x = stack.pop()
+                if x in chosen:
+                    return True
+                if x in seen:
+                    continue
+                seen.add(x)
+                stack.extend(p.parents.get(x, set()))
+            return False
+
+        pairs = [(par, k) for par, k in pairs if not under_chosen(par)]
+        plans = [plan_delete(p, par, k) for par, k in pairs]
+        files = list(dict.fromkeys(f for pl in plans for f in pl.files))
+        kept = list(dict.fromkeys(f for pl in plans for f in pl.kept))
         box = QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QMessageBox.Question)
-        text = (f"Удалить «{d.designation} {d.name}» из сборки «{pd.designation} {pd.name}» "
-                f"(вхождений: {plan.instances})?")
-        if plan.files:
+        if len(pairs) == 1:
+            par, k = pairs[0]
+            d, pd = p.doc(k), p.doc(par)
+            text = (f"Удалить «{d.designation} {d.name}» из сборки «{pd.designation} {pd.name}» "
+                    f"(вхождений: {plans[0].instances})?")
+        else:
+            text = f"Удалить из сборок элементов: {len(pairs)}?\n" + "\n".join(
+                f"  {p.doc(k).designation} {p.doc(k).name}  ←  {p.doc(par).designation}" for par, k in pairs[:20])
+            if len(pairs) > 20:
+                text += f"\n  … и ещё {len(pairs) - 20}"
+        if files:
             text += ("\n\nФайлы, которые больше нигде в изделии не используются:\n"
-                     + "\n".join("  " + p.display_path(norm(f))
-                                  for f in plan.files))
-        if plan.kept:
-            text += "\n\nОстаются (используются в других сборках):\n" + "\n".join("  " + os.path.basename(f) for f in plan.kept)
-        text += "\n\nПеред изменением сборка и файлы копируются в _backup; откат — «Обозначения → Откатить последнее»."
+                     + "\n".join("  " + p.display_path(norm(f)) for f in files[:25]))
+            if len(files) > 25:
+                text += f"\n  … и ещё {len(files) - 25}"
+        if kept:
+            text += "\n\nОстаются (используются в других сборках):\n" + "\n".join(
+                "  " + os.path.basename(f) for f in kept[:15])
+        text += "\n\nОтменить удаление — Ctrl+Z (сборки и файлы вернутся из _backup)."
         box.setText(text)
-        with_files = box.addButton("Удалить вхождения и файлы", QMessageBox.DestructiveRole) if plan.files else None
+        with_files = box.addButton("Удалить вхождения и файлы", QMessageBox.DestructiveRole) if files else None
         only = box.addButton("Только из сборки", QMessageBox.AcceptRole)
         box.addButton("Отмена", QMessageBox.RejectRole)
+        box.setDefaultButton(only)
         box.exec()
         clicked = box.clickedButton()
-        if clicked not in (with_files, only) or clicked is None:
+        if clicked is None or clicked not in (with_files, only):
+            return
+        if self.pending and not self._confirm_discard():
             return
         if clicked is only:
-            plan.files = []
+            for pl in plans:
+                pl.files = []
         root = p.root
         show = self.act_show_kompas.isChecked()
 
         def fn(K, log):
-            from kompas_manager.editing_ops import delete_from_assembly
+            from kompas_manager.editing_ops import delete_from_assemblies
 
-            return delete_from_assembly(K, root, plan, show=show, log=log)
+            return delete_from_assemblies(K, root, plans, show=show, log=log)
 
-        self._run_call(fn, lambda _r: self.scan(force=False), "Удаление из сборки")
+        title = (f"Удаление из сборки: {p.doc(pairs[0][1]).designation} {p.doc(pairs[0][1]).name}".rstrip()
+                 if len(pairs) == 1 else f"Удаление из сборок ({len(pairs)})")
+        self._run_call(fn, lambda _r: self.scan(force=False), title)
 
     def node_versions(self, key):
         from kompas_manager.ui.versions_dialog import VersionsDialog
@@ -1535,6 +1678,8 @@ class MainWindow(QMainWindow):
             else QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
         )
         self._update_pending_actions()
+        if hasattr(self, "undo_stack"):
+            self._update_undo_action()
         if busy:
             self.progress.setMaximum(0)  # неопределённый прогресс, пока не известно число файлов
 

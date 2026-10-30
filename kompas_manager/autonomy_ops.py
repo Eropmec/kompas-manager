@@ -84,6 +84,10 @@ def paste_node(K, root, plan, target_assembly, show=False, log=print, known=None
     Возвращает (новый головной файл узла, созданные файлы, отсутствующие, {копия внешнего файла: источник})."""
     created = transfer(K, plan, root, target_assembly, show=show, log=log)
     more, missing, sources = localize(K, root, created, show=show, log=log, backup=False, known=known)
+    b = Backup.latest(root)
+    if b is not None and more and b.manifest.get("description", "").startswith("Вставка узла"):
+        for path in more:
+            b.created(path)  # отмена вставки (Ctrl+Z) уберёт и скопированные внешние файлы
     return plan.new_root, created + more, missing, sources
 
 

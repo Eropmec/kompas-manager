@@ -279,12 +279,20 @@ def add_component(doc, path, log=print):
     raise RuntimeError("Компонент не вставился")
 
 
+def _late(obj):
+    """Объект COM с поздним связыванием (вызов методов, которых нет в библиотеке типов)."""
+    from win32com.client import dynamic
+
+    return dynamic.Dispatch(obj._oleobj_ if hasattr(obj, "_oleobj_") else obj)
+
+
 def delete_component(part, log=print):
-    """Удалить вхождение компонента из сборки. Возвращает способ, которым удалось."""
+    """Удалить вхождение компонента из сборки средствами API7. Возвращает способ, которым удалось."""
     errors = []
     for how, call in (
         ("API7 IModelObject.Delete()", lambda: cast(part, api7.IModelObject).Delete()),
         ("API7 IPart7.Delete()", lambda: part.Delete()),
+        ("API7 Delete() (позднее связывание)", lambda: _late(part).Delete()),
     ):
         try:
             result = call()
@@ -295,7 +303,36 @@ def delete_component(part, log=print):
             errors.append(f"{how}: {e}")
     for e in errors:
         log("  " + e)
-    raise RuntimeError("Компонент не удалился")
+    raise RuntimeError("Компонент не удалился средствами API7")
+
+
+def delete_components5(doc, path, log=print):
+    """Удалить все вхождения файла path из сборки средствами API5 (ksDocument3D.DeleteObject).
+    Возвращает число удалённых."""
+    k5 = connect5()
+    doc.Active = True
+    d5 = k5.ActiveDocument3D()
+    if d5 is None:
+        raise RuntimeError("API5: нет активного 3D-документа")
+    collection = d5.PartCollection(True)
+    n = collection.GetCount()
+    removed = 0
+    for i in reversed(range(n)):
+        p5 = collection.GetByIndex(i)
+        name = ""
+        for attr in ("fileName", "FileName"):
+            try:
+                name = getattr(p5, attr)
+                break
+            except Exception:
+                continue
+        if not name or os.path.normcase(os.path.normpath(name)) != os.path.normcase(os.path.normpath(path)):
+            continue
+        if d5.DeleteObject(p5):
+            removed += 1
+        else:
+            log(f"  API5 DeleteObject вернул False для вхождения {i}")
+    return removed
 
 
 # ---------- переменные 3D ----------

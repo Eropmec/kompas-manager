@@ -10,39 +10,83 @@ from kompas_manager.core.versions import extract_version, move_to_old, save_vers
 from kompas_manager.structure_ops import _new_model, relink_files
 
 
+def _count(K, doc, child):
+    return sum(1 for c in K.components(doc) if norm(c.FileName) == norm(child))
+
+
+def _delete_instances(K, doc, child, log):
+    """Удалить все вхождения child из открытой сборки: API7, затем API5. Если что-то осталось —
+    исключение до сохранения, сборка не меняется."""
+    removed, how = 0, ""
+    # С конца, чтобы индексы оставшихся компонентов не сдвигались
+    for c in reversed(K.components(doc)):
+        if norm(c.FileName) != norm(child):
+            continue
+        try:
+            how = K.delete_component(c, log)
+            removed += 1
+        except Exception as e:
+            log(f"  {e}")
+            break
+    left = _count(K, doc, child)
+    if left:
+        log(f"  после API7 осталось вхождений: {left}, пробую API5")
+        try:
+            n = K.delete_components5(doc, child, log)
+            removed += n
+            how = "API5 ksDocument3D.DeleteObject"
+        except Exception as e:
+            log(f"  API5: {e}")
+        left = _count(K, doc, child)
+    if left:
+        raise RuntimeError(f"КОМПАС не удалил вхождения ({left}); сборка не сохранена, файлы не удалялись")
+    if removed:
+        log(f"  удалено вхождений: {removed} ({how})")
+    return removed
+
+
 def delete_from_assembly(K, root, plan, show=False, log=print):
-    """Удалить все вхождения plan.child из plan.parent и, по плану, файлы узла."""
-    backup = Backup.create(root, [plan.parent] + plan.files, "Удаление из сборки")
+    """Удалить все вхождения plan.child из plan.parent и, по плану, файлы узла.
+    Возвращает число удалённых вхождений; резервная копия — в _backup (откат Ctrl+Z)."""
+    return delete_from_assemblies(K, root, [plan], show=show, log=log)
+
+
+def delete_from_assemblies(K, root, plans, show=False, log=print):
+    """Несколько удалений одной операцией (одна резервная копия). Сначала меняются все сборки;
+    файлы удаляются, только если из всех сборок вхождения ушли."""
+    parents = list(dict.fromkeys(p.parent for p in plans))
+    files = list(dict.fromkeys(f for p in plans for f in p.files if norm(f) not in {norm(x) for x in parents}))
+    backup = Backup.create(root, parents + files, "Удаление из сборки")
+    removed = 0
     session = K.Session(show, log)
     try:
         app = session.app
-        doc = K.open_doc(app, plan.parent, visible=show, readonly=False)
-        try:
-            removed = 0
-            # Удаляем с конца, чтобы индексы оставшихся компонентов не сдвигались
-            for c in reversed(K.components(doc)):
-                if norm(c.FileName) == norm(plan.child):
-                    how = K.delete_component(c, log)
-                    removed += 1
-            if removed:
-                log(f"  удалено вхождений: {removed} ({how})")
+        for parent in parents:
+            children = list(dict.fromkeys(p.child for p in plans if p.parent == parent))
+            log(f"{os.path.basename(parent)}:")
+            doc = K.open_doc(app, parent, visible=show, readonly=False)
             try:
-                K.rebuild_3d(doc)
-            except Exception as e:
-                log(f"  перестроение: {e}")
-            doc.Save()
-        finally:
-            K.close_doc(doc)
-        doc = K.open_doc(app, plan.parent, visible=False, readonly=True)
-        try:
-            left = sum(1 for c in K.components(doc) if norm(c.FileName) == norm(plan.child))
-        finally:
-            K.close_doc(doc)
-        if left:
-            raise RuntimeError(f"в сборке осталось вхождений: {left}; файлы не удалялись")
+                for child in children:
+                    log(f"  удаляется {os.path.basename(child)}")
+                    removed += _delete_instances(K, doc, child, log)
+                try:
+                    K.rebuild_3d(doc)
+                except Exception as e:
+                    log(f"  перестроение: {e}")
+                doc.Save()
+            finally:
+                K.close_doc(doc)
+            doc = K.open_doc(app, parent, visible=False, readonly=True)
+            try:
+                left = sum(_count(K, doc, c) for c in children)
+            finally:
+                K.close_doc(doc)
+            if left:
+                raise RuntimeError(f"{os.path.basename(parent)}: после сохранения осталось вхождений {left}; "
+                                   "файлы не удалялись")
     finally:
         session.close(log)
-    for f in plan.files:
+    for f in files:
         try:
             backup.remove_original(f)
             log(f"  файл удалён (копия в _backup): {os.path.basename(f)}")

@@ -71,6 +71,21 @@ class Backup:
     # ---------- откат ----------
 
     @classmethod
+    def names(cls, root):
+        """Имена папок резервных копий изделия (для поиска копий, сделанных операцией)."""
+        base = os.path.join(root, BACKUP_DIR)
+        return set(os.listdir(base)) if os.path.isdir(base) else set()
+
+    @classmethod
+    def load(cls, root, name):
+        folder = os.path.join(root, BACKUP_DIR, name)
+        try:
+            with open(os.path.join(folder, MANIFEST), encoding="utf-8") as f:
+                return cls(root, folder, json.load(f))
+        except (OSError, ValueError):
+            return None
+
+    @classmethod
     def latest(cls, root):
         base = os.path.join(root, BACKUP_DIR)
         if not os.path.isdir(base):
