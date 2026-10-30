@@ -41,6 +41,28 @@ def has_kompas_files(path):
         return False
 
 
+def is_project(path):
+    """Папка проекта: в ней лежат изделия (папки с файлами КОМПАСа)."""
+    return any(has_kompas_files(d) for d in subdirs(path))
+
+
+def project_of(sections, path):
+    """Папка проекта для изделия или его подпапки: раздел → заказчик → проект → изделие,
+    то есть второй уровень от папки раздела. Вне разделов и выше проекта — сама папка."""
+    full = os.path.normcase(os.path.abspath(path))
+    best = None
+    for s in sections:
+        sec = os.path.normcase(os.path.abspath(s["path"]))
+        if (full == sec or full.startswith(sec + os.sep)) and (best is None or len(sec) > len(best[0])):
+            best = (sec, os.path.abspath(s["path"]))
+    if best is None:
+        return path
+    parts = os.path.relpath(os.path.abspath(path), best[1]).split(os.sep)
+    if parts == ["."] or len(parts) <= 2:
+        return path
+    return os.path.join(best[1], parts[0], parts[1])
+
+
 def subdirs(path):
     try:
         return sorted((e.path for e in os.scandir(path)
@@ -204,7 +226,9 @@ class WorkspacePanel(QWidget):
         item.setData(0, PATH_ROLE, path)
         item.setToolTip(0, path)
         product = has_kompas_files(path)
-        item.setIcon(0, self.style().standardIcon(QStyle.SP_FileDialogDetailedView if product else QStyle.SP_DirIcon))
+        icon = (QStyle.SP_FileDialogDetailedView if product else
+                QStyle.SP_DirHomeIcon if is_project(path) else QStyle.SP_DirIcon)
+        item.setIcon(0, self.style().standardIcon(icon))
         if product:
             font = item.font(0)
             font.setBold(True)
@@ -328,9 +352,13 @@ class WorkspacePanel(QWidget):
             self.product_copied.emit(ref)
         return ref
 
+    def project_of(self, path):
+        return project_of(self.sections, path)
+
     def _clicked(self, item, _col):
         path = item.data(0, PATH_ROLE)
-        if path and not item.data(0, SECTION_ROLE) and has_kompas_files(path):
+        if path and not item.data(0, SECTION_ROLE) and (has_kompas_files(path) or
+                                                         (not self.browse_only and is_project(path))):
             self.open_requested.emit(path)
 
     def _open(self, item):
@@ -360,7 +388,8 @@ class WorkspacePanel(QWidget):
             menu.exec(self.tree.viewport().mapToGlobal(pos))
             return
         if not section:
-            menu.addAction("Открыть как изделие", lambda: self.open_requested.emit(path))
+            menu.addAction("Открыть проект" if is_project(path) else "Открыть (проект этого изделия)",
+                           lambda: self.open_requested.emit(path))
             menu.addSeparator()
         menu.addAction("Новое изделие (структура)…", lambda: self.new_product_requested.emit(path))
         menu.addAction("Новая папка…", lambda: self._new_folder(item, path))

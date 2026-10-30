@@ -14,12 +14,16 @@ def _count(K, doc, child):
     return sum(1 for c in K.components(doc) if norm(c.FileName) == norm(child))
 
 
-def _delete_instances(K, doc, child, log):
-    """Удалить все вхождения child из открытой сборки: API7, затем API5. Если что-то осталось —
-    исключение до сохранения, сборка не меняется."""
+def _delete_instances(K, doc, child, log, limit=None):
+    """Удалить вхождения child из открытой сборки (все или не больше limit): API7, затем API5.
+    Если удалилось не всё нужное — исключение до сохранения, сборка не меняется."""
+    before = _count(K, doc, child)
+    want = before if limit is None else min(limit, before)
     removed, how = 0, ""
     # С конца, чтобы индексы оставшихся компонентов не сдвигались
     for c in reversed(K.components(doc)):
+        if removed >= want:
+            break
         if norm(c.FileName) != norm(child):
             continue
         try:
@@ -29,20 +33,44 @@ def _delete_instances(K, doc, child, log):
             log(f"  {e}")
             break
     left = _count(K, doc, child)
-    if left:
+    if before - left < want:
         log(f"  после API7 осталось вхождений: {left}, пробую API5")
         try:
-            n = K.delete_components5(doc, child, log)
-            removed += n
+            K.delete_components5(doc, child, log, limit=None if limit is None else want - (before - left))
             how = "API5 ksDocument3D.DeleteObject"
         except Exception as e:
             log(f"  API5: {e}")
         left = _count(K, doc, child)
-    if left:
-        raise RuntimeError(f"КОМПАС не удалил вхождения ({left}); сборка не сохранена, файлы не удалялись")
+    removed = before - left
+    if removed < want:
+        raise RuntimeError(f"КОМПАС не удалил вхождения ({want - removed}); сборка не сохранена, файлы не удалялись")
     if removed:
         log(f"  удалено вхождений: {removed} ({how})")
     return removed
+
+
+def move_occurrence(K, root, old_parent, new_parent, child, show=False, log=print):
+    """Перенести одно вхождение child из сборки old_parent в new_parent (файлы не копируются)."""
+    Backup.create(root, [old_parent, new_parent], "Перенос в другую сборку")
+    session = K.Session(show, log)
+    try:
+        app = session.app
+        target = K.open_doc(app, new_parent, visible=show, readonly=False)
+        try:
+            how = K.add_component(target, child, log)
+            log(f"  {os.path.basename(child)} добавлен в {os.path.basename(new_parent)} ({how})")
+            source = K.open_doc(app, old_parent, visible=show, readonly=False)
+            try:
+                _delete_instances(K, source, child, log, limit=1)
+                source.Save()
+            finally:
+                K.close_doc(source)
+            target.Save()
+        finally:
+            K.close_doc(target)
+    finally:
+        session.close(log)
+    log(f"Перенесено: {os.path.basename(child)} из {os.path.basename(old_parent)} в {os.path.basename(new_parent)}")
 
 
 def delete_from_assembly(K, root, plan, show=False, log=print):
@@ -93,6 +121,100 @@ def delete_from_assemblies(K, root, plans, show=False, log=print):
         except Exception as e:
             log(f"  не удалён {os.path.basename(f)}: {e}")
     return removed
+
+
+def _matrix(K, c, log):
+    try:
+        return K.get_matrix(c)
+    except Exception as e:
+        log(f"  положение {os.path.basename(c.FileName)} не прочитано: {e}")
+        return None
+
+
+def combine_to_subassembly(K, root, parent, children, new_path, designation, name, template="",
+                           show=False, log=print):
+    """«Объединить компоненты в подсборку»: все вхождения children из сборки parent переносятся
+    в новую сборку new_path (с теми же положениями), новая сборка вставляется в parent."""
+    backup = Backup.create(root, [parent], "Объединение в подсборку")
+    want = {norm(c) for c in children}
+    lost = 0
+    session = K.Session(show, log)
+    try:
+        app = session.app
+        doc = K.open_doc(app, parent, visible=show, readonly=False)
+        try:
+            items = [(c.FileName, _matrix(K, c, log)) for c in K.components(doc) if norm(c.FileName) in want]
+            if not items:
+                raise RuntimeError("в сборке не найдены выбранные компоненты")
+            os.makedirs(os.path.dirname(new_path), exist_ok=True)
+            sub = _new_model(K, app, new_path, template, show)
+            backup.created(new_path)
+            try:
+                K.write_props(sub, designation, name)
+                for path, m in items:
+                    if not K.insert_part(sub, path, m, log):
+                        lost += 1
+                sub.Save()
+            finally:
+                K.close_doc(sub)
+            log(f"  создана подсборка {os.path.basename(new_path)}: компонентов {len(items)}")
+            for child in dict.fromkeys(children):
+                _delete_instances(K, doc, child, log)
+            K.insert_part(doc, new_path, None, log)
+            try:
+                K.rebuild_3d(doc)
+            except Exception as e:
+                log(f"  перестроение: {e}")
+            doc.Save()
+        finally:
+            K.close_doc(doc)
+    finally:
+        session.close(log)
+    if lost:
+        log(f"  внимание: положение не перенесено у компонентов: {lost}")
+    log("  сопряжения выбранных компонентов с остальной сборкой не переносятся — проверьте сборку в КОМПАСе")
+    return new_path, lost
+
+
+def destroy_subassembly(K, root, parent, sub_path, show=False, log=print):
+    """«Разрушить»: компоненты подсборки sub_path переходят в сборку parent в тех же положениях,
+    вхождения подсборки удаляются. Файл подсборки остаётся (выпадет из структуры — уйдёт в _old при архивации)."""
+    from kompas_manager.core.geometry import IDENTITY, compose, detect_layout
+
+    Backup.create(root, [parent], "Разрушение подсборки")
+    lost = 0
+    session = K.Session(show, log)
+    try:
+        app = session.app
+        sub = K.open_doc(app, sub_path, visible=False, readonly=True)
+        try:
+            inner = [(c.FileName, _matrix(K, c, log)) for c in K.components(sub)]
+        finally:
+            K.close_doc(sub)
+        doc = K.open_doc(app, parent, visible=show, readonly=False)
+        try:
+            outers = [_matrix(K, c, log) for c in K.components(doc) if norm(c.FileName) == norm(sub_path)]
+            if not outers:
+                raise RuntimeError("подсборка не найдена в сборке")
+            layout = detect_layout([m for m in outers + [m for _p, m in inner] if m])
+            for om in outers:
+                for path, im in inner:
+                    m = compose(om or IDENTITY, im, layout) if im is not None else None
+                    if not K.insert_part(doc, path, m, log):
+                        lost += 1
+            _delete_instances(K, doc, sub_path, log)
+            try:
+                K.rebuild_3d(doc)
+            except Exception as e:
+                log(f"  перестроение: {e}")
+            doc.Save()
+        finally:
+            K.close_doc(doc)
+    finally:
+        session.close(log)
+    log(f"Подсборка {os.path.basename(sub_path)} разрушена: в {os.path.basename(parent)} добавлено компонентов "
+        f"{len(inner) * len(outers)}" + (f", без положения: {lost}" if lost else ""))
+    return lost
 
 
 def append_to_assembly(K, root, plan, templates=None, show=False, log=print):

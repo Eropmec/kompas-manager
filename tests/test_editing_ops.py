@@ -92,7 +92,7 @@ def test_delete_falls_back_to_api5(tmp_path):
     def fail7(c, log=print):
         raise RuntimeError("API7 не умеет")
 
-    def del5(d, path, log=print):
+    def del5(d, path, log=print, limit=None):
         before = len(d.data["refs"])
         d.data["refs"] = [r for r in d.data["refs"] if norm(r) != norm(path)]
         return before - len(d.data["refs"])
@@ -143,3 +143,55 @@ def test_delete_several(tmp_path):
     assert [os.path.basename(r) for r in FILES[head]["refs"]] == ["Г.001.00 - Узел.a3d"]
     assert FILES[k(root, "Г.001.00 - Узел.a3d")]["refs"] == []
     assert not os.path.exists(os.path.join(root, "Г.000.01 - Корпус.m3d"))
+
+
+def test_move_occurrence(tmp_path):
+    root = str(tmp_path)
+    setup(root)
+    head, sub = k(root, "Г.000.00 - Аппарат.a3d"), k(root, "Г.001.00 - Узел.a3d")
+    part = k(root, "Г.001.01 - Патрубок.m3d")
+    editing_ops.move_occurrence(K(), root, sub, head, part, log=lambda *_: None)
+    assert [os.path.basename(r) for r in FILES[sub]["refs"]] == ["Г.001.01 - Патрубок.m3d"]  # было 2
+    assert os.path.basename(FILES[head]["refs"][-1]) == "Г.001.01 - Патрубок.m3d"
+
+
+def KM():
+    """Фейк с положениями: у ссылки есть матрица (храним рядом со ссылками)."""
+    from kompas_manager.core.geometry import IDENTITY
+
+    api = K()
+    mats = {}
+
+    def get_matrix(c):
+        return mats.get((norm(c.d.path), c.i), IDENTITY)
+
+    def insert_part(d, path, m=None, log=print):
+        d.data["refs"].append(path)
+        if m is not None:
+            mats[(norm(d.path), len(d.data["refs"]) - 1)] = tuple(m)
+        return True
+
+    api.get_matrix, api.insert_part, api.mats = get_matrix, insert_part, mats
+    return api
+
+
+def test_combine_and_destroy(tmp_path):
+    from kompas_manager.core.geometry import IDENTITY
+
+    root = str(tmp_path)
+    setup(root)
+    head = k(root, "Г.000.00 - Аппарат.a3d")
+    body = os.path.join(root, "Г.000.01 - Корпус.m3d")
+    api = KM()
+    moved = IDENTITY[:12] + (50.0, 0.0, 0.0, 1.0)
+    api.mats[(head, 1)] = moved  # корпус сдвинут на 50 по X
+    new = os.path.join(root, "Г.002.00 - Обечайка.a3d")
+    editing_ops.combine_to_subassembly(api, root, head, [body], new, "Г.002.00", "Обечайка", log=lambda *_: None)
+    assert [os.path.basename(r) for r in FILES[head]["refs"]] == ["Г.001.00 - Узел.a3d", "Г.002.00 - Обечайка.a3d"]
+    assert FILES[norm(new)]["refs"] == [body] and FILES[norm(new)]["des"] == "Г.002.00"
+    assert api.mats[(norm(new), 0)] == moved  # положение сохранено внутри подсборки
+    api.mats.clear()
+    api.mats[(norm(new), 0)] = moved
+    editing_ops.destroy_subassembly(api, root, head, new, log=lambda *_: None)
+    assert [os.path.basename(r) for r in FILES[head]["refs"]] == ["Г.001.00 - Узел.a3d", "Г.000.01 - Корпус.m3d"]
+    assert api.mats[(head, 2)] == moved  # вставлен третьим (до удаления подсборки) в своём положении

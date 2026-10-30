@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -472,6 +473,113 @@ class LevelUpDialog(QDialog):
 
     def values(self):
         return self.des.text().strip(), self.name.text().strip()
+
+
+class CombineDialog(QDialog):
+    """Наименование и обозначение новой подсборки для «Объединить в подсборку»."""
+
+    def __init__(self, titles, parent_title, suggest, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Объединить в подсборку")
+        self.resize(560, 260)
+        self.suggest = suggest  # наименование -> (обозначение, имя файла)
+        self.name = QLineEdit("Подсборка")
+        self.des = QLineEdit()
+        self.file = QLabel()
+        self.file.setStyleSheet("color: gray;")
+        self._auto = True
+        self.des.textEdited.connect(lambda _t: setattr(self, "_auto", False))
+        self.name.textChanged.connect(self._update)
+        form = QFormLayout()
+        form.addRow("Наименование:", self.name)
+        form.addRow("Обозначение:", self.des)
+        form.addRow("Файл:", self.file)
+        lst = "\n".join("  " + t for t in titles[:12]) + (f"\n  … и ещё {len(titles) - 12}" if len(titles) > 12 else "")
+        note = QLabel(f"Из сборки «{parent_title}» в новую подсборку переносятся (все вхождения, с теми же "
+                      f"положениями):\n{lst}\n\nСопряжения этих компонентов с остальной сборкой не переносятся.")
+        note.setWordWrap(True)
+        buttons = russian_buttons(QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel))
+        buttons.button(QDialogButtonBox.Ok).setText("Объединить")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+        self._update()
+
+    def _update(self):
+        des, path = self.suggest(self.name.text().strip(), self.des.text().strip() if not self._auto else "")
+        if self._auto:
+            self.des.setText(des)
+        self.file.setText(path)
+
+    def _accept(self):
+        if not self.des.text().strip() or not self.name.text().strip():
+            QMessageBox.warning(self, self.windowTitle(), "Заполните обозначение и наименование.")
+            return
+        self.accept()
+
+    def values(self):
+        return self.des.text().strip(), self.name.text().strip()
+
+
+class ArchiveDialog(QDialog):
+    """Архив проекта: какие головные изделия входят в проект; всё, что вне их структуры, — в _old."""
+
+    def __init__(self, project, heads, parent=None):
+        from kompas_manager.core.localize import structure_files
+
+        super().__init__(parent)
+        self.setWindowTitle("Архивировать проект")
+        self.resize(720, 560)
+        self.project = project
+        self.structure_files = structure_files
+        self.heads = QListWidget()
+        for key in heads:
+            d = project.doc(key)
+            it = QListWidgetItem(f"{d.designation} {d.name}  —  {project.display_path(key)}".strip())
+            it.setData(Qt.UserRole, key)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked)
+            self.heads.addItem(it)
+        self.heads.itemChanged.connect(lambda *_: self._update())
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.orphans = QListWidget()
+        buttons = russian_buttons(QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel))
+        self.ok = buttons.button(QDialogButtonBox.Ok)
+        self.ok.setText("Создать архив")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Изделия проекта</b> (головные сборки). Снимите галочку с изделий, которые "
+                                "в проект не входят:"))
+        layout.addWidget(self.heads, 2)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.orphans, 3)
+        note = QLabel("Файлы вне структуры переносятся в папку _old проекта (их можно вернуть оттуда), затем "
+                      "создаётся zip без _old, _backup и _versions.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+        self._update()
+
+    def selected_heads(self):
+        return [self.heads.item(i).data(Qt.UserRole) for i in range(self.heads.count())
+                if self.heads.item(i).checkState() == Qt.Checked]
+
+    def _update(self):
+        heads = self.selected_heads()
+        _keep, self.out = self.structure_files(self.project, heads)
+        self.orphans.clear()
+        for path in self.out:
+            self.orphans.addItem(os.path.relpath(path, self.project.root))
+        self.summary.setText(f"<b>Вне структуры — в _old: {len(self.out)}</b>" if self.out else
+                             "Все файлы проекта входят в структуру — переносить в _old нечего.")
+        self.ok.setEnabled(bool(heads))
+        self.ok.setText("Убрать в _old и создать архив" if self.out else "Создать архив")
 
 
 class GroupEditDialog(QDialog):

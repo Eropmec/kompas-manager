@@ -77,3 +77,29 @@ def archive_product(root, zip_path):
                 z.write(path, os.path.join(base, os.path.relpath(path, root)))
                 count += 1
     return count
+
+
+def structure_files(project, heads):
+    """Что входит в структуру выбранных головных сборок: модели по дереву, их чертежи и
+    спецификации. Возвращает (ключи файлов структуры, пути файлов проекта вне структуры)."""
+    keep, stack = set(), [h for h in heads if project.doc(h) is not None]
+    while stack:
+        k = stack.pop()
+        if k in keep or not project.inside(k):
+            continue
+        keep.add(k)
+        stack.extend(c for c, _n in project.components.get(k, []))
+    models = set(keep)
+    for m in models:
+        keep.update(d for d in project.drawings_of.get(m, []) + project.specs_of.get(m, []) if project.inside(d))
+    # спецификации на спецификации / чертежи сборок второго уровня
+    changed = True
+    while changed:
+        changed = False
+        for k, d in project.docs.items():
+            if k not in keep and d.kind in ("drawing", "spec") and project.inside(k) and \
+                    {norm(r) for r in d.refs} & keep:
+                keep.add(k)
+                changed = True
+    out = sorted(project.raw_paths[k] for k in project.docs if project.inside(k) and k not in keep)
+    return keep, out

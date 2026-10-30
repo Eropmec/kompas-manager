@@ -154,8 +154,8 @@ class MainWindow(QMainWindow):
         m_project.addAction(self.act_expand)
         m_project.addAction(self.act_collapse)
         m_project.addSeparator()
-        m_project.addAction("Сделать изделие автономным…", self.make_autonomous)
-        m_project.addAction("Архивировать изделие…", self.archive_product)
+        m_project.addAction("Сделать проект автономным…", self.make_autonomous)
+        m_project.addAction("Архивировать проект…", self.archive_product)
 
         m_des = menu.addMenu("Обозначения")
         m_des.addAction(self.act_scheme)
@@ -299,6 +299,16 @@ class MainWindow(QMainWindow):
             self.open_project(os.path.normpath(path))
 
     def open_project(self, path):
+        """Открыть проект целиком. Если указано изделие (или его подпапка) — открывается его проект,
+        а головная сборка изделия выделяется в дереве."""
+        project = self.workspace.project_of(path) if hasattr(self, "workspace") else path
+        if os.path.normcase(os.path.normpath(project)) != os.path.normcase(os.path.normpath(path)):
+            focus = path
+            if self.project is not None and self._same_folder(self.project.root, project) and self.worker is None:
+                self._focus_folder(focus)
+                return
+            self._after_scan = lambda: self._focus_folder(focus)
+            path = project
         if not os.path.isdir(path):
             QMessageBox.warning(self, APP_NAME, f"Папка не найдена:\n{path}")
             self._remove_recent(path)
@@ -490,6 +500,9 @@ class MainWindow(QMainWindow):
             menu.addAction(f"Изменить выделенные ({len(editable)})…", lambda: self.group_edit(editable)).setEnabled(
                 bool(editable) and self.worker is None)
             pairs = self._delete_pairs()
+            parents = {par for par, _k in pairs}
+            act = menu.addAction(f"Объединить в подсборку ({len(pairs)})…", lambda: self.combine(pairs))
+            act.setEnabled(len(parents) == 1 and len(pairs) == len(selected) and self.worker is None)
             menu.addAction(f"Удалить из сборок ({len(pairs)})…\tDel", lambda: self.delete_items(pairs)).setEnabled(
                 bool(pairs) and self.worker is None)
             act = menu.addAction("Переобозначить выделенные ветки…", lambda: self.rename(self.selected_branches()))
@@ -510,7 +523,7 @@ class MainWindow(QMainWindow):
         if d is not None and d.designation:
             menu.addAction("Копировать обозначение", lambda: QApplication.clipboard().setText(d.designation))
         if d is not None and d.kind in ("part", "assembly"):
-            menu.addAction("Копировать узел\tCtrl+C", lambda: self.set_clip(node_ref(p.root, key)))
+            menu.addAction("Копировать узел\tCtrl+C", lambda: self.set_clip(self._ref_at(self.tree.indexAt(pos))))
         if self.node_clip and self.worker is None and self.target_assembly(self.tree.indexAt(pos)):
             td = p.doc(self.target_assembly(self.tree.indexAt(pos)))
             menu.addAction(f"Вставить {ref_title(self.node_clip)} в «{td.designation} {td.name}»\tCtrl+V".replace("  ", " "),
@@ -534,6 +547,9 @@ class MainWindow(QMainWindow):
                 menu.addAction("Добавить детали и сборки…", lambda: self.append_items(key))
             parent_key = self._parent_key_at(self.tree.indexAt(pos))
             if parent_key:
+                menu.addAction("Объединить в подсборку…", lambda: self.combine([(parent_key, key)]))
+                if d.kind == "assembly":
+                    menu.addAction("Разрушить сборку…", lambda: self.destroy(parent_key, key))
                 menu.addAction("Удалить из сборки…\tDel", lambda: self.delete_from_assembly(parent_key, key))
             menu.addAction("Версии узла…", lambda: self.node_versions(key))
             if self.pending and d.kind == "assembly":
@@ -1190,6 +1206,92 @@ class MainWindow(QMainWindow):
                  if len(pairs) == 1 else f"Удаление из сборок ({len(pairs)})")
         self._run_call(fn, lambda _r: self.scan(force=False), title)
 
+    def combine(self, pairs):
+        """«Объединить компоненты в подсборку» для выделенных элементов одной сборки."""
+        from kompas_manager.core.editing import plan_append
+        from kompas_manager.core.naming import file_name
+        from kompas_manager.core.structure import Node
+        from kompas_manager.ui.dialogs import CombineDialog
+
+        p = self.project
+        parent = pairs[0][0]
+        children = [k for _par, k in pairs]
+        pd = p.doc(parent)
+        folder = os.path.dirname(self._path(parent))
+
+        def suggest(name, des):
+            if not des:
+                try:
+                    plan = plan_append(p, parent, [Node("assembly", name or "Подсборка")], self.proj_settings)
+                    des = plan.items[0].designation if plan.items else ""
+                except Exception:
+                    des = ""
+            fname = file_name(des, name, ".a3d") if des else (name or "Подсборка") + ".a3d"
+            return des, os.path.join(os.path.relpath(folder, p.root), fname)
+
+        titles = [f"{p.doc(k).designation} {p.doc(k).name}".strip() for k in children]
+        dlg = CombineDialog(titles, f"{pd.designation} {pd.name}".strip(), suggest, self)
+        if not dlg.exec():
+            return
+        des, name = dlg.values()
+        new_path = os.path.join(folder, file_name(des, name, ".a3d"))
+        if os.path.exists(new_path):
+            QMessageBox.warning(self, APP_NAME, f"Файл уже существует:\n{new_path}")
+            return
+        if self.pending and not self._confirm_discard():
+            return
+        root, show = p.root, self.act_show_kompas.isChecked()
+        parent_path = self._path(parent)
+        paths = [self._path(k) for k in children]
+        template = self._templates().get("assembly", "")
+
+        def fn(K, log):
+            from kompas_manager.editing_ops import combine_to_subassembly
+
+            return combine_to_subassembly(K, root, parent_path, paths, new_path, des, name, template,
+                                          show=show, log=log)
+
+        def done(result):
+            _path, lost = result
+            if lost:
+                QMessageBox.warning(self, APP_NAME, f"Подсборка создана, но у {lost} компонентов не удалось перенести "
+                                    "положение — они стоят в начале координат. Подробности — в журнале.")
+            self.scan(force=False)
+
+        self._run_call(fn, done, f"Объединение в подсборку: {des} {name}")
+
+    def destroy(self, parent_key, key):
+        """«Разрушить»: состав подсборки переходит в родительскую сборку."""
+        p = self.project
+        d, pd = p.doc(key), p.doc(parent_key)
+        others = [x for x in p.parents.get(key, set()) if x != parent_key]
+        text = (f"Разрушить «{d.designation} {d.name}» в сборке «{pd.designation} {pd.name}»?\n\n"
+                "Её компоненты переходят в эту сборку в тех же положениях, вхождения подсборки удаляются. "
+                "Сопряжения подсборки со сборкой не переносятся.")
+        text += ("\n\nПодсборка используется и в других сборках — там она остаётся." if others else
+                 "\n\nФайл подсборки остаётся на диске, но выпадает из структуры — при архивации проекта он "
+                 "уйдёт в _old.")
+        text += "\n\nОтменить — Ctrl+Z."
+        if QMessageBox.question(self, APP_NAME, text) != QMessageBox.Yes:
+            return
+        if self.pending and not self._confirm_discard():
+            return
+        root, show = p.root, self.act_show_kompas.isChecked()
+        parent_path, sub_path = self._path(parent_key), self._path(key)
+
+        def fn(K, log):
+            from kompas_manager.editing_ops import destroy_subassembly
+
+            return destroy_subassembly(K, root, parent_path, sub_path, show=show, log=log)
+
+        def done(lost):
+            if lost:
+                QMessageBox.warning(self, APP_NAME, f"У {lost} компонентов не удалось перенести положение — они стоят "
+                                    "в начале координат. Подробности — в журнале.")
+            self.scan(force=False)
+
+        self._run_call(fn, done, f"Разрушение сборки: {d.designation} {d.name}")
+
     def node_versions(self, key):
         from kompas_manager.ui.versions_dialog import VersionsDialog
 
@@ -1251,7 +1353,9 @@ class MainWindow(QMainWindow):
     def _ref_at(self, index):
         key = self._key_at(index) if index is not None and index.isValid() else None
         d = self.project.doc(key) if (key and self.project) else None
-        return node_ref(self.project.root, key) if d is not None and d.kind in ("part", "assembly") else None
+        if d is None or d.kind not in ("part", "assembly"):
+            return None
+        return node_ref(self.project.root, key, self._parent_key_at(index))
 
     def copy_selected(self):
         ref = self._ref_at(self.tree.currentIndex())
@@ -1263,11 +1367,38 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Скопировано: {ref_title(ref)}. Выделите сборку в дереве изделия и нажмите "
                                      "Ctrl+V (или перетащите элемент мышью).", 8000)
 
+    def _focus_folder(self, folder):
+        """Выделить в дереве головную сборку изделия из папки folder (или первую его модель)."""
+        if self.project is None:
+            return
+        base = norm(folder) + os.sep
+        keys = [k for k in self.project.roots() if k.startswith(base)]
+        keys += [k for k, d in self.project.docs.items() if k.startswith(base) and d.kind == "assembly"]
+        for key in keys:
+            items = self.builder.items_by_key.get(key) if self.builder else None
+            if items:
+                index = self.proxy.mapFromSource(items[0].index())
+                self.tree.setCurrentIndex(index)
+                self.tree.scrollTo(index)
+                self.tree.expand(index)
+                return
+
     def _same_folder(self, a, b):
         return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
+    def _in_project(self, folder):
+        """Папка внутри открытого проекта (изделие этого проекта или его подпапка)."""
+        if self.project is None:
+            return False
+        f = norm(folder)
+        return f == self.project.root_key or f.startswith(self.project.root_key + os.sep)
+
     def _with_project(self, folder, then):
-        """Изделие по папке: уже открытое (текущее или источник) или прочитанное заново."""
+        """Изделие по папке: уже открытое (текущее или источник) или прочитанное заново.
+        Изделие из открытого проекта берётся из его дерева — вставка будет ссылкой."""
+        if self._in_project(folder):
+            then(self.project)
+            return
         for p in (self.project, self.source.project):
             if p is not None and self._same_folder(p.root, folder):
                 then(p)
@@ -1310,14 +1441,23 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "В изделии нет сборки, куда вставлять.")
             return
         if "product" in ref:
-            self._with_project(ref["product"], lambda p: self._paste_product(p, target))
+            folder = ref["product"]
+            self._with_project(folder, lambda p: self._paste_product(p, target, folder))
         else:
-            key = ref["key"]
-            self._with_project(ref["root"], lambda p: self.paste_from_source(p, norm(key), target))
+            key, parent = ref["key"], ref.get("parent")
+            self._with_project(ref["root"], lambda p: self.paste_from_source(p, norm(key), target,
+                                                                               norm(parent) if parent else None))
 
-    def _paste_product(self, src_project, target):
+    def _paste_product(self, src_project, target, folder=None):
+        base = norm(folder) + os.sep if folder else None
         heads = [k for k in src_project.roots()
-                 if src_project.inside(k) and src_project.doc(k) is not None and src_project.doc(k).kind == "assembly"]
+                 if src_project.inside(k) and src_project.doc(k) is not None and src_project.doc(k).kind == "assembly"
+                 and (base is None or k.startswith(base))]
+        if not heads and base:
+            # изделие уже включено в другую сборку проекта: его головная — сборка папки, не входящая
+            # в сборки той же папки
+            inner = [k for k, d in src_project.docs.items() if k.startswith(base) and d.kind == "assembly"]
+            heads = [k for k in inner if not any(par.startswith(base) for par in src_project.parents.get(k, ()))]
         if not heads:
             QMessageBox.information(self, APP_NAME, f"В изделии «{os.path.basename(src_project.root)}» нет головной сборки.")
             return
@@ -1331,7 +1471,7 @@ class MainWindow(QMainWindow):
             key = heads[titles.index(title)]
         self.paste_from_source(src_project, key, target)
 
-    def paste_from_source(self, src_project, src_key, target=None):
+    def paste_from_source(self, src_project, src_key, target=None, src_parent=None):
         from kompas_manager.core.transfer import plan_paste
 
         if self.project is None:
@@ -1344,8 +1484,9 @@ class MainWindow(QMainWindow):
         if src_project.doc(src_key) is None:
             QMessageBox.warning(self, APP_NAME, "Скопированный узел не найден в изделии — обновите его и скопируйте снова.")
             return
-        if self._same_folder(src_project.root, self.project.root):
-            self._paste_same_product(src_key, target)
+        if self._same_folder(src_project.root, self.project.root) or (
+                self._in_project(src_project.root) and self.project.doc(src_key) is not None):
+            self._paste_same_product(src_key, target, src_parent)
             return
         if self.pending and not self._confirm_discard():
             return
@@ -1372,8 +1513,10 @@ class MainWindow(QMainWindow):
             return
         self._do_paste(plan, target_path, box.clickedButton() is renum, f"{sd.designation} {sd.name}")
 
-    def _paste_same_product(self, src_key, target):
-        """Вставка узла внутри того же изделия: ещё одно вхождение или независимая копия."""
+    def _paste_same_product(self, src_key, target, src_parent=None):
+        """Вставка внутри открытого проекта: перенос из сборки в сборку, ещё одно вхождение
+        (для другого изделия проекта — включение ссылкой) или независимая копия."""
+        from kompas_manager.core.editing import product_folder
         from kompas_manager.core.transfer import plan_paste, subtree_keys
 
         p = self.project
@@ -1381,39 +1524,62 @@ class MainWindow(QMainWindow):
         if target == src_key or target in models:
             QMessageBox.information(self, APP_NAME, "Нельзя вставить сборку саму в себя или в собственный узел.")
             return
+        if src_parent and src_parent == target:
+            self.statusBar().showMessage("Узел уже в этой сборке.", 5000)
+            return
         sd, td = p.doc(src_key), p.doc(target)
+        other_product = product_folder(p, src_key) != product_folder(p, target) and bool(product_folder(p, src_key))
+        can_move = bool(src_parent) and p.doc(src_parent) is not None
         box = QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QMessageBox.Question)
-        box.setText(f"Вставить «{sd.designation} {sd.name}» в сборку «{td.designation} {td.name}» этого же изделия.\n\n"
-                    "• Ещё одно вхождение — в сборку добавляется тот же файл (количество в спецификации растёт, "
-                    "изменения узла видны во всех местах).\n"
-                    "• Независимая копия — файлы узла копируются и получают новые номера по схеме; копию "
-                    "можно менять отдельно.")
-        occ = box.addButton("Ещё одно вхождение", QMessageBox.AcceptRole)
+        lines = [f"«{sd.designation} {sd.name}» → сборка «{td.designation} {td.name}».", ""]
+        if can_move:
+            ps = p.doc(src_parent)
+            lines.append(f"• Перенести — убрать из «{ps.designation} {ps.name}» (одно вхождение) и добавить сюда.")
+        lines.append("• Ещё одно вхождение — " + (
+            "изделие включается ссылкой на свои файлы, ничего не копируется; изменения изделия будут видны везде."
+            if other_product else "в сборку добавляется тот же файл, ничего не копируется; изменения узла видны везде."))
+        lines.append("• Независимая копия — файлы узла копируются и получают новые номера по схеме; копию можно "
+                     "менять отдельно.")
+        box.setText("\n".join(lines))
+        move = box.addButton("Перенести", QMessageBox.AcceptRole) if can_move else None
+        occ = box.addButton("Включить ссылкой" if other_product else "Ещё одно вхождение", QMessageBox.AcceptRole)
         copy = box.addButton("Независимая копия", QMessageBox.AcceptRole)
         box.addButton("Отмена", QMessageBox.RejectRole)
+        box.setDefaultButton(move or occ)
         box.exec()
-        if box.clickedButton() not in (occ, copy):
+        clicked = box.clickedButton()
+        if clicked is None or clicked not in (move, occ, copy):
             return
         if self.pending and not self._confirm_discard():
             return
         target_path, path = self._path(target), self._path(src_key)
-        if box.clickedButton() is occ:
-            root, show = p.root, self.act_show_kompas.isChecked()
+        root, show = p.root, self.act_show_kompas.isChecked()
+        title = f"{sd.designation} {sd.name}".strip()
+        if clicked is move:
+            old_parent = self._path(src_parent)
 
+            def fn(K, log):
+                from kompas_manager.editing_ops import move_occurrence
+
+                return move_occurrence(K, root, old_parent, target_path, path, show=show, log=log)
+
+            self._run_call(fn, lambda _r: self.scan(force=False), f"Перенос: {title}")
+            return
+        if clicked is occ:
             def fn(K, log):
                 from kompas_manager.autonomy_ops import add_occurrence
 
                 return add_occurrence(K, root, target_path, path, show=show, log=log)
 
-            self._run_call(fn, lambda _r: self.scan(force=False), f"Вхождение: {sd.designation} {sd.name}")
+            self._run_call(fn, lambda _r: self.scan(force=False), f"Вхождение: {title}")
             return
         plan = plan_paste(p, src_key, os.path.dirname(target_path))
         if plan.problems:
             QMessageBox.warning(self, APP_NAME, "Вставить нельзя:\n" + "\n".join(plan.problems[:15]))
             return
-        self._do_paste(plan, target_path, True, f"{sd.designation} {sd.name}")
+        self._do_paste(plan, target_path, True, title)
 
     def _do_paste(self, plan, target_path, do_renum, title):
         root = self.project.root
@@ -1511,31 +1677,49 @@ class MainWindow(QMainWindow):
         self._run_call(fn, done, "Перенос внешних файлов в изделие")
 
     def archive_product(self):
-        if self.project is None:
+        """Архив проекта: выпавшие из структуры файлы — в _old, затем zip актуальных файлов."""
+        if self.project is None or self.worker is not None:
             return
         from kompas_manager.core.localize import archive_product, external_refs
+        from kompas_manager.core.versions import move_to_old
+        from kompas_manager.ui.dialogs import ArchiveDialog
 
         if external_refs(self.project):
             answer = QMessageBox.question(
-                self, APP_NAME, "Изделие ссылается на файлы вне своей папки — в архиве их не будет. "
-                "Сначала сделать изделие автономным?")
+                self, APP_NAME, "Проект ссылается на файлы вне своей папки (библиотека, другие проекты) — в архиве "
+                "их не будет. Сначала сделать проект автономным?")
             if answer == QMessageBox.Yes:
                 self.make_autonomous()
                 return
+        heads = [k for k in self.project.roots() if self.project.inside(k)]
+        if not heads:
+            QMessageBox.information(self, APP_NAME, "В проекте нет головных сборок.")
+            return
+        dlg = ArchiveDialog(self.project, heads, self)
+        if not dlg.exec():
+            return
         root = self.project.root
         default = os.path.join(os.path.dirname(root), os.path.basename(root) + ".zip")
-        path, _ = QFileDialog.getSaveFileName(self, "Архив изделия", default, "Архив zip (*.zip)")
+        path, _ = QFileDialog.getSaveFileName(self, "Архив проекта", default, "Архив zip (*.zip)")
         if not path:
             return
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
+            moved = move_to_old(root, dlg.out) if dlg.out else []
+            if moved:
+                self.log.appendPlainText(f"\n=== Архивация: в _old перенесено файлов {len(moved)}")
+                for m in moved:
+                    self.log.appendPlainText("  " + os.path.relpath(m, root))
             n = archive_product(root, path)
         except OSError as e:
             QMessageBox.warning(self, APP_NAME, f"Архив не создан:\n{e}")
             return
         finally:
             QApplication.restoreOverrideCursor()
-        QMessageBox.information(self, APP_NAME, f"Архив создан: {path}\nФайлов: {n} (без _versions, _backup, _old).")
+        QMessageBox.information(self, APP_NAME, f"Архив создан: {path}\nФайлов: {n} (без _versions, _backup, _old)."
+                                + (f"\n\nВ _old перенесено файлов вне структуры: {len(moved)}." if moved else ""))
+        if moved:
+            self.scan(force=False)
 
     def level_up(self, head_key):
         from kompas_manager.ui.dialogs import LevelUpDialog
@@ -1545,7 +1729,8 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         des, name = dlg.values()
-        folder, head = p.root, self._path(head_key)
+        head = self._path(head_key)
+        folder = os.path.dirname(head)  # папка изделия, головой которого была сборка
         show = self.act_show_kompas.isChecked()
 
         def fn(K, log):
@@ -1602,6 +1787,9 @@ class MainWindow(QMainWindow):
         os.makedirs(folder, exist_ok=True)
         try:
             settings.save(folder)
+            project = self.workspace.project_of(folder)
+            if not self._same_folder(project, folder) and not ProjectSettings.exists(project):
+                settings.save(project)  # первое изделие проекта задаёт схему и код всего проекта
         except OSError as e:
             self.log.appendPlainText(f"Настройки изделия не сохранены: {e}")
         templates = {"part": self.settings.value("template_part", ""),

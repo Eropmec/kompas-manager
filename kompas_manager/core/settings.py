@@ -24,13 +24,21 @@ class ProjectSettings:
     # ---------- файл ----------
 
     @classmethod
-    def load(cls, root):
+    def exists(cls, root):
+        return os.path.isfile(os.path.join(root, FILE_NAME))
+
+    @classmethod
+    def load(cls, root, merge_products=True):
+        """Настройки папки. Если у папки проекта своих настроек нет, берутся настройки изделий
+        (подпапок): схема и код — первого найденного, закрепления и реестры — всех, с путями от проекта."""
         path = os.path.join(root, FILE_NAME)
         s = cls()
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
+            if merge_products:
+                s._merge_products(root)
             return s
         sch = data.get("scheme") or {}
         if sch.get("template"):
@@ -40,6 +48,23 @@ class ProjectSettings:
         s.excluded = list(data.get("excluded") or [])
         s.origins = {k: dict(v) for k, v in (data.get("origins") or {}).items()}
         return s
+
+    def _merge_products(self, root):
+        try:
+            subs = sorted(e.name for e in os.scandir(root) if e.is_dir() and not e.name.startswith(("_", ".")))
+        except OSError:
+            return
+        first = True
+        for name in subs:
+            if not self.exists(os.path.join(root, name)):
+                continue
+            sub = ProjectSettings.load(os.path.join(root, name), merge_products=False)
+            if first:
+                self.scheme, self.code, first = sub.scheme, sub.code, False
+            pre = name + "/"
+            self.pins.update({pre + k: v for k, v in sub.pins.items()})
+            self.excluded += [pre + k for k in sub.excluded]
+            self.origins.update({pre + k: v for k, v in sub.origins.items()})
 
     def save(self, root):
         data = {

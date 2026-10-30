@@ -19,6 +19,13 @@ class DeletePlan:
     kept: list = field(default_factory=list)  # файлы узла, которые используются в других местах
 
 
+def product_folder(project, key):
+    """Папка изделия внутри проекта (первая подпапка от папки проекта), '' — файл в корне проекта."""
+    rel = os.path.relpath(project.raw_paths.get(key, key), project.root)
+    parts = rel.split(os.sep)
+    return parts[0] if len(parts) > 1 else ""
+
+
 def plan_delete(project, parent_key, child_key, with_files=True):
     instances = dict(project.components.get(parent_key, [])).get(child_key, 0)
     plan = DeletePlan(project.raw_paths.get(parent_key, parent_key), project.raw_paths.get(child_key, child_key),
@@ -39,6 +46,10 @@ def plan_delete(project, parent_key, child_key, with_files=True):
             if outside:
                 removed.discard(m)
                 changed = True
+    # Файлы другого изделия проекта не удаляются: изделие просто выходит из этой сборки
+    home = product_folder(project, parent_key)
+    foreign = {m for m in models if home and product_folder(project, m) != home}
+    removed -= foreign
     for m in models:
         (plan.files if m in removed else plan.kept).append(project.raw_paths.get(m, m))
     for d in docs:

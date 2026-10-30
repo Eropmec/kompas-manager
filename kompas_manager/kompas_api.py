@@ -175,11 +175,36 @@ def connect5():
     return cast(raw, api5.KompasObject)
 
 
+# Документы, открытые пользователем в КОМПАСе до операции: программа работает прямо в них
+# (изменения сразу видны в окне) и не закрывает их. Свои документы программа закрывает сама.
+_ours = set()
+_users = set()
+
+
+def _doc_path(doc):
+    try:
+        return norm(doc.PathName)
+    except Exception:
+        return ""
+
+
 def open_doc(app, path, visible=False, readonly=True):
+    key = norm(path)
+    if key not in _ours:
+        existing = find_open(app, path)
+        if existing is not None:
+            _users.add(key)
+            return existing
+    _users.discard(key)
     doc = app.Documents.Open(path, visible, readonly)
     if doc is None:
         raise RuntimeError(f"КОМПАС не открыл файл: {path}")
+    _ours.add(key)
     return doc
+
+
+def opened_by_user(doc):
+    return _doc_path(doc) in _users
 
 
 def find_open(app, path):
@@ -207,6 +232,11 @@ def open_for_reading(app, path):
 
 
 def close_doc(doc):
+    """Закрыть документ, открытый программой. Документ пользователя остаётся открытым."""
+    key = _doc_path(doc)
+    if key in _users:
+        return
+    _ours.discard(key)
     doc.Close(getattr(const, "kdDoNotSaveChanges", 0))
 
 
@@ -244,6 +274,7 @@ def new_doc(app, path, visible=False):
     if doc is None:
         raise RuntimeError(f"Не удалось создать документ {const_name}")
     doc.SaveAs(path)
+    _ours.add(norm(path))
     return doc
 
 
@@ -279,6 +310,41 @@ def add_component(doc, path, log=print):
     raise RuntimeError("Компонент не вставился")
 
 
+def get_matrix(part):
+    """Положение компонента в сборке: 16 чисел IPlacement3D.GetMatrix3D()."""
+    return tuple(float(v) for v in part.Placement.GetMatrix3D())
+
+
+def insert_part(doc, path, matrix=None, log=print):
+    """Вставить компонент и, если задано, поставить его в положение matrix.
+    Возвращает True, если положение задано (False — компонент вставлен в начало координат)."""
+    parts = top_part(doc).Parts
+    part = None
+    for args in ((path, True, True), (path, True)):
+        try:
+            part = parts.AddFromFile(*args)
+            if part is not None:
+                break
+        except Exception as e:
+            log(f"  AddFromFile{args[1:]}: {e}")
+    if part is None:
+        add_component(doc, path, log)  # запасные способы (API5); положение тогда не задаётся
+        return matrix is None
+    placed = matrix is None
+    if matrix is not None:
+        try:
+            placement = part.Placement
+            if placement.InitByMatrix3D(list(matrix)) is not False:
+                placed = part.UpdatePlacement(True) is not False
+        except Exception as e:
+            log(f"  положение {os.path.basename(path)} не задано: {e}")
+    try:
+        part.Update()
+    except Exception:
+        pass
+    return placed
+
+
 def _late(obj):
     """Объект COM с поздним связыванием (вызов методов, которых нет в библиотеке типов)."""
     from win32com.client import dynamic
@@ -306,7 +372,7 @@ def delete_component(part, log=print):
     raise RuntimeError("Компонент не удалился средствами API7")
 
 
-def delete_components5(doc, path, log=print):
+def delete_components5(doc, path, log=print, limit=None):
     """Удалить все вхождения файла path из сборки средствами API5 (ksDocument3D.DeleteObject).
     Возвращает число удалённых."""
     k5 = connect5()
@@ -318,6 +384,8 @@ def delete_components5(doc, path, log=print):
     n = collection.GetCount()
     removed = 0
     for i in reversed(range(n)):
+        if limit is not None and removed >= limit:
+            break
         p5 = collection.GetByIndex(i)
         name = ""
         for attr in ("fileName", "FileName"):

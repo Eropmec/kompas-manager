@@ -69,3 +69,26 @@ def test_renumber_subtree(tmp_path):
     p = Project(root, docs)
     res = renumber_subtree(p, norm(docs[0].path), norm(docs[3].path), ProjectSettings(code="Г"))
     assert res == {norm(docs[3].path): "Г.002.00", norm(docs[4].path): "Г.002.01"}
+
+
+def test_structure_files(tmp_path):
+    from kompas_manager.core.localize import structure_files
+    from kompas_manager.core.model import norm
+    from kompas_manager.core.project import Project
+    from test_project import doc
+
+    root = str(tmp_path)
+    p = Project(root, [
+        doc(root, "А/Г.000.00 - Аппарат.a3d", "assembly", "Г.000.00", "Аппарат", ["Б/Б.000.00 - Насос.a3d"]),
+        doc(root, "Б/Б.000.00 - Насос.a3d", "assembly", "Б.000.00", "Насос", ["Б/Б.000.01 - Вал.m3d"]),
+        doc(root, "Б/Б.000.01 - Вал.m3d", "part", "Б.000.01", "Вал"),
+        doc(root, "Б/Б.000.01 - Вал.cdw", "drawing", "Б.000.01", "Вал", ["Б/Б.000.01 - Вал.m3d"]),
+        doc(root, "А/Г.001.00 - Старый узел.a3d", "assembly", "Г.001.00", "Старый узел", ["А/Г.001.01 - Ось.m3d"]),
+        doc(root, "А/Г.001.01 - Ось.m3d", "part", "Г.001.01", "Ось"),
+        doc(root, "А/Г.001.00 - Старый узел.spw", "spec", "Г.001.00", "Старый узел", ["А/Г.001.00 - Старый узел.a3d"]),
+    ])
+    head = norm(os.path.join(root, "А", "Г.000.00 - Аппарат.a3d"))
+    keep, out = structure_files(p, [head])
+    names = sorted(os.path.basename(x) for x in out)
+    assert names == ["Г.001.00 - Старый узел.a3d", "Г.001.00 - Старый узел.spw", "Г.001.01 - Ось.m3d"]
+    assert norm(os.path.join(root, "Б", "Б.000.01 - Вал.cdw")) in keep

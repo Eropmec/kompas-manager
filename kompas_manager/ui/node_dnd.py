@@ -14,8 +14,12 @@ from PySide6.QtWidgets import QAbstractItemView, QTreeView, QTreeWidget
 MIME = "application/x-kompas-node"
 
 
-def node_ref(root, key):
-    return {"root": root, "key": key}
+def node_ref(root, key, parent=None):
+    """parent — сборка, из которой взят узел (для переноса из одной сборки в другую)."""
+    ref = {"root": root, "key": key}
+    if parent:
+        ref["parent"] = parent
+    return ref
 
 
 def product_ref(folder):
