@@ -152,7 +152,7 @@ def test_move_occurrence(tmp_path):
     part = k(root, "Г.001.01 - Патрубок.m3d")
     editing_ops.move_occurrence(K(), root, sub, head, part, log=lambda *_: None)
     assert [os.path.basename(r) for r in FILES[sub]["refs"]] == ["Г.001.01 - Патрубок.m3d"]  # было 2
-    assert os.path.basename(FILES[head]["refs"][-1]) == "Г.001.01 - Патрубок.m3d"
+    assert norm(FILES[head]["refs"][-1]) == part
 
 
 def KM():
