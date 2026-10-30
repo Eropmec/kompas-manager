@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QStyle,
     QTableWidget,
     QTableWidgetItem,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -158,6 +157,7 @@ class WorkspacePanel(QWidget):
     open_requested = Signal(str)  # папка изделия
     new_product_requested = Signal(str)  # родительская папка
     folder_copied = Signal(str, str)  # откуда, куда
+    product_copied = Signal(dict)  # Ctrl+C на изделии: ссылка для вставки в сборку
 
     def __init__(self, parent=None, browse_only=False):
         super().__init__(parent)
@@ -175,7 +175,9 @@ class WorkspacePanel(QWidget):
         top.addWidget(refresh_btn)
         top.addStretch(1)
 
-        self.tree = QTreeWidget()
+        from kompas_manager.ui.node_dnd import DragTree
+
+        self.tree = DragTree(self._ref_for)
         self.tree.setHeaderHidden(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._menu)
@@ -311,6 +313,21 @@ class WorkspacePanel(QWidget):
             save_sections(self.q, self.sections)
             self.reload()
 
+    def _ref_for(self, item):
+        """Изделие (папка с файлами КОМПАСа) перетаскивается в сборку как узел."""
+        from kompas_manager.ui.node_dnd import product_ref
+
+        path = item.data(0, PATH_ROLE) if item is not None else None
+        if path and not item.data(0, SECTION_ROLE) and has_kompas_files(path):
+            return product_ref(path)
+        return None
+
+    def copy_current(self):
+        ref = self._ref_for(self.tree.currentItem())
+        if ref:
+            self.product_copied.emit(ref)
+        return ref
+
     def _clicked(self, item, _col):
         path = item.data(0, PATH_ROLE)
         if path and not item.data(0, SECTION_ROLE) and has_kompas_files(path):
@@ -336,6 +353,8 @@ class WorkspacePanel(QWidget):
         if self.browse_only:
             if not section:
                 menu.addAction("Показать состав", lambda: self.open_requested.emit(path))
+                if self._ref_for(item):
+                    menu.addAction("Копировать изделие для вставки в сборку\tCtrl+C", self.copy_current)
             menu.addAction("Обновить", lambda: self._refresh_item(item))
             menu.addAction("Показать в проводнике", lambda: self._explorer(path))
             menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -349,6 +368,8 @@ class WorkspacePanel(QWidget):
             menu.addAction("Переименовать…", lambda: self._rename(item, path))
             menu.addSeparator()
             menu.addAction("Копировать папку", lambda: setattr(self, "clipboard", path))
+            if self._ref_for(item):
+                menu.addAction("Копировать изделие для вставки в сборку\tCtrl+C", self.copy_current)
         paste = menu.addAction("Вставить папку" + (f" «{os.path.basename(self.clipboard)}»" if self.clipboard else ""),
                                lambda: self._paste(item, path))
         paste.setEnabled(bool(self.clipboard))

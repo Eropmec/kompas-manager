@@ -4,7 +4,8 @@
   ссылки перепривязываются; цепочки (библиотечная сборка со своими деталями) обрабатываются целиком;
 - paste_node: узел из другого изделия копируется в выбранную сборку и полностью отвязывается;
 - level_up: новая головная сборка, в которую вставляется существующее изделие как есть;
-- insert_library: копия библиотечного элемента сразу вставляется в выбранную сборку.
+- insert_library: копия библиотечного элемента сразу вставляется в выбранную сборку;
+- add_occurrence: ещё одно вхождение уже имеющегося в изделии файла в сборку.
 """
 import os
 import shutil
@@ -130,3 +131,23 @@ def insert_library(K, root, plan, element, target_assembly, count=1, show=False,
         session.close(log)
     log(f"Вставлено в {os.path.basename(target_assembly)}: {os.path.basename(path)} × {max(1, count)}")
     return path, sources
+
+
+def add_occurrence(K, root, target_assembly, path, count=1, show=False, log=print):
+    """Вставить в сборку ещё count вхождений файла изделия (без копирования файлов)."""
+    if norm(target_assembly) == norm(path):
+        raise RuntimeError("нельзя вставить сборку саму в себя")
+    Backup.create(root, [target_assembly], "Добавление вхождения")
+    session = K.Session(show, log)
+    try:
+        doc = K.open_doc(session.app, target_assembly, visible=show, readonly=False)
+        try:
+            for _ in range(max(1, count)):
+                K.add_component(doc, path, log)
+            doc.Save()
+        finally:
+            K.close_doc(doc)
+    finally:
+        session.close(log)
+    log(f"В {os.path.basename(target_assembly)} добавлено: {os.path.basename(path)} × {max(1, count)}")
+    return path

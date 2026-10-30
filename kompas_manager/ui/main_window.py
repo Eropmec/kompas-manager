@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import QSettings, QSortFilterProxyModel, Qt
-from PySide6.QtGui import QAction, QCursor, QKeySequence
+from PySide6.QtGui import QAction, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QStyle,
     QTabWidget,
     QToolBar,
-    QTreeView,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -40,6 +39,7 @@ from kompas_manager.core.rename_plan import build_plan
 from kompas_manager.core.settings import ProjectSettings
 from kompas_manager.ui.dialogs import FindReplaceDialog, PlanDialog, ProjectSchemeDialog
 from kompas_manager.ui.library_panel import LibraryPanel
+from kompas_manager.ui.node_dnd import NodeTreeView, node_ref, ref_title
 from kompas_manager.ui.workspace_panel import WorkspacePanel
 from kompas_manager.ui.project_tree import COL_DES, COL_NAME, KEY_ROLE, ProjectTreeBuilder, severity_icon
 
@@ -195,7 +195,11 @@ class MainWindow(QMainWindow):
         self.proxy.setFilterKeyColumn(-1)
         self.filter_edit.textChanged.connect(self._apply_filter)
 
-        self.tree = QTreeView()
+        self.tree = NodeTreeView()
+        self.tree.ref_at = lambda index: self._ref_at(index)
+        self.tree.accepts = lambda index: (self.project is not None and self.worker is None
+                                           and self.target_assembly(index) is not None)
+        self.tree.node_dropped.connect(lambda ref, index: self.paste_ref(ref, index))
         self.tree.setModel(self.proxy)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
@@ -246,6 +250,16 @@ class MainWindow(QMainWindow):
         outer.setStretchFactor(2, 2)
         outer.setSizes([260, 760, 460])
         self._after_scan = None
+        self.node_clip = None  # ссылка на узел или изделие для Ctrl+V
+        self.source.copy_requested.connect(self.set_clip)
+        self.source.browser.product_copied.connect(self.set_clip)
+        self.workspace.product_copied.connect(self.set_clip)
+        for widget, copy in ((self.tree, self.copy_selected), (self.source.tree, self.source.copy_current),
+                             (self.source.browser.tree, self.source.browser.copy_current),
+                             (self.workspace.tree, self.workspace.copy_current)):
+            QShortcut(QKeySequence.Copy, widget, copy, context=Qt.WidgetShortcut)
+        QShortcut(QKeySequence.Paste, self.tree, lambda: self.paste_ref(self.node_clip, self.tree.currentIndex()),
+                  context=Qt.WidgetShortcut)
         self.tree.selectionModel().currentChanged.connect(lambda *_: self._update_target_label())
         self._update_target_label()
         self.setCentralWidget(outer)
@@ -476,6 +490,12 @@ class MainWindow(QMainWindow):
         act.setEnabled(exists)
         if d is not None and d.designation:
             menu.addAction("Копировать обозначение", lambda: QApplication.clipboard().setText(d.designation))
+        if d is not None and d.kind in ("part", "assembly"):
+            menu.addAction("Копировать узел\tCtrl+C", lambda: self.set_clip(node_ref(p.root, key)))
+        if self.node_clip and self.worker is None and self.target_assembly(self.tree.indexAt(pos)):
+            td = p.doc(self.target_assembly(self.tree.indexAt(pos)))
+            menu.addAction(f"Вставить {ref_title(self.node_clip)} в «{td.designation} {td.name}»\tCtrl+V".replace("  ", " "),
+                           lambda: self.paste_ref(self.node_clip, self.tree.indexAt(pos)))
         if self.builder is not None and self.builder.editable(key) and self.worker is None:
             menu.addSeparator()
             if key in self.pending:
@@ -1046,11 +1066,12 @@ class MainWindow(QMainWindow):
 
     # ---------- источник, автономность, уровень выше ----------
 
-    def target_assembly(self):
-        """Сборка, куда вставлять: выделенная в дереве (для детали — её сборка), иначе головная."""
+    def target_assembly(self, index=None):
+        """Сборка, куда вставлять: под index или выделенная в дереве (для детали — её сборка), иначе головная."""
         if self.project is None:
             return None
-        index = self.tree.currentIndex()
+        if index is None:
+            index = self.tree.currentIndex()
         key = self._key_at(index) if index.isValid() else None
         d = self.project.doc(key) if key else None
         if d is not None and d.kind == "assembly" and self.project.inside(key):
@@ -1082,19 +1103,106 @@ class MainWindow(QMainWindow):
         self._run_call(fn, lambda docs: self.source.show_project(Project(folder, docs)),
                        f"Чтение изделия-источника: {os.path.basename(folder)}")
 
-    def paste_from_source(self, src_project, src_key):
+    # ---------- буфер узлов: Ctrl+C / Ctrl+V и перетаскивание ----------
+
+    def _ref_at(self, index):
+        key = self._key_at(index) if index is not None and index.isValid() else None
+        d = self.project.doc(key) if (key and self.project) else None
+        return node_ref(self.project.root, key) if d is not None and d.kind in ("part", "assembly") else None
+
+    def copy_selected(self):
+        ref = self._ref_at(self.tree.currentIndex())
+        if ref:
+            self.set_clip(ref)
+
+    def set_clip(self, ref):
+        self.node_clip = ref
+        self.statusBar().showMessage(f"Скопировано: {ref_title(ref)}. Выделите сборку в дереве изделия и нажмите "
+                                     "Ctrl+V (или перетащите элемент мышью).", 8000)
+
+    def _same_folder(self, a, b):
+        return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+    def _with_project(self, folder, then):
+        """Изделие по папке: уже открытое (текущее или источник) или прочитанное заново."""
+        for p in (self.project, self.source.project):
+            if p is not None and self._same_folder(p.root, folder):
+                then(p)
+                return
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, APP_NAME, f"Папка не найдена:\n{folder}")
+            return
+
+        def fn(K, log):
+            from kompas_manager.core.cache import ScanCache
+            from kompas_manager.scanner import scan
+
+            cache = ScanCache()
+            try:
+                docs, _complete = scan(folder, cache, show=False, log=log)
+            finally:
+                cache.close()
+            return docs
+
+        def done(docs):
+            p = Project(folder, docs)
+            self.source.show_project(p)
+            then(p)
+
+        self._run_call(fn, done, f"Чтение изделия: {os.path.basename(folder)}")
+
+    def paste_ref(self, ref, index=None):
+        """Вставить скопированный или перетащенный узел (изделие) в сборку под index."""
+        if not ref:
+            QMessageBox.information(self, APP_NAME, "Сначала скопируйте узел (Ctrl+C) в дереве изделия, в источнике "
+                                    "справа или изделие в разделах.")
+            return
+        if self.project is None:
+            QMessageBox.information(self, APP_NAME, "Откройте изделие, в которое вставлять.")
+            return
+        if self.worker is not None:
+            return
+        target = self.target_assembly(index)
+        if target is None:
+            QMessageBox.information(self, APP_NAME, "В изделии нет сборки, куда вставлять.")
+            return
+        if "product" in ref:
+            self._with_project(ref["product"], lambda p: self._paste_product(p, target))
+        else:
+            key = ref["key"]
+            self._with_project(ref["root"], lambda p: self.paste_from_source(p, norm(key), target))
+
+    def _paste_product(self, src_project, target):
+        heads = [k for k in src_project.roots()
+                 if src_project.inside(k) and src_project.doc(k) is not None and src_project.doc(k).kind == "assembly"]
+        if not heads:
+            QMessageBox.information(self, APP_NAME, f"В изделии «{os.path.basename(src_project.root)}» нет головной сборки.")
+            return
+        key = heads[0]
+        if len(heads) > 1:
+            titles = [f"{src_project.doc(k).designation} {src_project.doc(k).name}".strip() for k in heads]
+            title, ok = QInputDialog.getItem(self, APP_NAME, "В изделии несколько головных сборок. Какую вставить?",
+                                             titles, 0, False)
+            if not ok:
+                return
+            key = heads[titles.index(title)]
+        self.paste_from_source(src_project, key, target)
+
+    def paste_from_source(self, src_project, src_key, target=None):
         from kompas_manager.core.transfer import plan_paste
 
         if self.project is None:
             QMessageBox.information(self, APP_NAME, "Откройте изделие, в которое вставлять.")
             return
-        if os.path.normcase(src_project.root) == os.path.normcase(self.project.root):
-            QMessageBox.information(self, APP_NAME, "Источник и текущее изделие совпадают. Для правки состава "
-                                    "используйте «Добавить детали и сборки» и «Удалить из сборки».")
-            return
-        target = self.target_assembly()
+        target = target or self.target_assembly()
         if target is None:
             QMessageBox.information(self, APP_NAME, "В изделии нет сборки, куда вставлять.")
+            return
+        if src_project.doc(src_key) is None:
+            QMessageBox.warning(self, APP_NAME, "Скопированный узел не найден в изделии — обновите его и скопируйте снова.")
+            return
+        if self._same_folder(src_project.root, self.project.root):
+            self._paste_same_product(src_key, target)
             return
         if self.pending and not self._confirm_discard():
             return
@@ -1119,10 +1227,54 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() not in (renum, keep):
             return
-        do_renum = box.clickedButton() is renum
+        self._do_paste(plan, target_path, box.clickedButton() is renum, f"{sd.designation} {sd.name}")
+
+    def _paste_same_product(self, src_key, target):
+        """Вставка узла внутри того же изделия: ещё одно вхождение или независимая копия."""
+        from kompas_manager.core.transfer import plan_paste, subtree_keys
+
+        p = self.project
+        models, _docs = subtree_keys(p, src_key)
+        if target == src_key or target in models:
+            QMessageBox.information(self, APP_NAME, "Нельзя вставить сборку саму в себя или в собственный узел.")
+            return
+        sd, td = p.doc(src_key), p.doc(target)
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"Вставить «{sd.designation} {sd.name}» в сборку «{td.designation} {td.name}» этого же изделия.\n\n"
+                    "• Ещё одно вхождение — в сборку добавляется тот же файл (количество в спецификации растёт, "
+                    "изменения узла видны во всех местах).\n"
+                    "• Независимая копия — файлы узла копируются и получают новые номера по схеме; копию "
+                    "можно менять отдельно.")
+        occ = box.addButton("Ещё одно вхождение", QMessageBox.AcceptRole)
+        copy = box.addButton("Независимая копия", QMessageBox.AcceptRole)
+        box.addButton("Отмена", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() not in (occ, copy):
+            return
+        if self.pending and not self._confirm_discard():
+            return
+        target_path, path = self._path(target), self._path(src_key)
+        if box.clickedButton() is occ:
+            root, show = p.root, self.act_show_kompas.isChecked()
+
+            def fn(K, log):
+                from kompas_manager.autonomy_ops import add_occurrence
+
+                return add_occurrence(K, root, target_path, path, show=show, log=log)
+
+            self._run_call(fn, lambda _r: self.scan(force=False), f"Вхождение: {sd.designation} {sd.name}")
+            return
+        plan = plan_paste(p, src_key, os.path.dirname(target_path))
+        if plan.problems:
+            QMessageBox.warning(self, APP_NAME, "Вставить нельзя:\n" + "\n".join(plan.problems[:15]))
+            return
+        self._do_paste(plan, target_path, True, f"{sd.designation} {sd.name}")
+
+    def _do_paste(self, plan, target_path, do_renum, title):
         root = self.project.root
         show = self.act_show_kompas.isChecked()
-
         known = self._known_externals()
 
         def fn(K, log):
@@ -1139,7 +1291,7 @@ class MainWindow(QMainWindow):
                 self._after_scan = lambda: self._renumber_pasted(target_path, new_root)
             self.scan(force=False)
 
-        self._run_call(fn, done, f"Вставка узла: {sd.designation} {sd.name}")
+        self._run_call(fn, done, f"Вставка узла: {title}")
 
     def _renumber_pasted(self, parent_path, root_path):
         from kompas_manager.core.editing import renumber_subtree

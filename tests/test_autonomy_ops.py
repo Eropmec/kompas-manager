@@ -82,3 +82,18 @@ def test_paste_and_level_up(tmp_path, monkeypatch):
     top = autonomy_ops.level_up(fake(), str(dst), "Г.100.00", "Установка", head, log=lambda *_: None)
     assert os.path.basename(top) == "Г.100.00 - Установка.a3d"
     assert FILES[norm(top)]["refs"] == [head] and FILES[norm(head)]["des"] == "Г.000.00"
+
+
+def test_add_occurrence(tmp_path, monkeypatch):
+    FILES.clear()
+    root = tmp_path / "Изделие"
+    part = str(root / "Деталь.m3d")
+    head = str(root / "А.a3d")
+    put(part, "Д", "Деталь")
+    put(head, "А", "А", [part])
+    autonomy_ops.add_occurrence(fake(), str(root), head, part, count=2, log=lambda *_: None)
+    assert FILES[norm(head)]["refs"] == [part, part, part]
+    assert os.path.isdir(root / "_backup")
+    import pytest
+    with pytest.raises(RuntimeError):
+        autonomy_ops.add_occurrence(fake(), str(root), head, head, log=lambda *_: None)

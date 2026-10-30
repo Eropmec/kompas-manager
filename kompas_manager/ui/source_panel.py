@@ -10,13 +10,13 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStyle,
     QTabWidget,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from kompas_manager.core.model import KIND_TITLES
+from kompas_manager.ui.node_dnd import DragTree, node_ref
 from kompas_manager.ui.workspace_panel import WorkspacePanel
 
 KEY_ROLE = Qt.UserRole + 40
@@ -25,6 +25,7 @@ KEY_ROLE = Qt.UserRole + 40
 class SourcePanel(QWidget):
     load_requested = Signal(str)  # открыть изделие-источник (папку)
     paste_requested = Signal(object, str)  # проект-источник, ключ узла
+    copy_requested = Signal(dict)  # Ctrl+C: ссылка на узел
 
     def __init__(self, library_panel, parent=None):
         super().__init__(parent)
@@ -35,7 +36,9 @@ class SourcePanel(QWidget):
         self.browser.open_requested.connect(self.load_requested.emit)
         self.title = QLabel("Выберите изделие в разделах выше")
         self.title.setWordWrap(True)
-        self.tree = QTreeWidget()
+        self.tree = DragTree(self._ref_for)
+        self.tree.setToolTip("Перетащите сборку или деталь в дерево изделия слева или нажмите Ctrl+C, "
+                             "затем Ctrl+V на нужной сборке слева")
         self.tree.setHeaderLabels(["Обозначение", "Наименование", "Тип"])
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.tree.itemSelectionChanged.connect(self._selection)
@@ -119,6 +122,16 @@ class SourcePanel(QWidget):
     def set_target(self, text):
         self.target_label.setText(f"Куда: {text}" if text else "Откройте изделие слева — туда будет вставка")
         self.library.insert_btn.setToolTip(f"Вставить в {text}" if text else "")
+
+    def _ref_for(self, item):
+        key = item.data(0, KEY_ROLE) if item is not None else None
+        return node_ref(self.project.root, key) if key and self.project is not None else None
+
+    def copy_current(self):
+        ref = self._ref_for(self.tree.currentItem())
+        if ref:
+            self.copy_requested.emit(ref)
+        return ref
 
     def _current_key(self):
         it = self.tree.currentItem()
